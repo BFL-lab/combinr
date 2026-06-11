@@ -1,14 +1,16 @@
-//! Shared helpers for the golden-parity tests.
+//! Shared helpers for the golden tests.
 //!
-//! Locates the reference PASA `pasa_cpp` directory (and its compiled `pasa`
-//! binary) so the golden tests run wherever the reference lives:
-//!   1. `$COMBINR_PASA_DIR` (the PASApipeline root), if set;
-//!   2. `PASApipeline/` inside the crate (vendored);
-//!   3. `../PASApipeline/` beside the crate (sibling checkout);
-//!   4. `/home/matt/PASApipeline` (this workstation's location).
+//! Golden references are committed under `tests/data/` (generated once from the
+//! original PASA C++ `pasa` binary and the PASA `Alternative_splice_comparer`
+//! Perl module). The tests compare combinr's output against these fixtures, so
+//! **no PASA code runs at test time**. See `validation/` for how the goldens are
+//! regenerated.
 
 #![allow(dead_code)]
 
+use combinr::altsplice::EventRecord;
+use combinr::assemble::ClusterAssembly;
+use combinr::model::Strand;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -16,46 +18,53 @@ use std::path::{Path, PathBuf};
 /// (member accessions, (orient, segment strings...)).
 pub type CanonAssembly = (BTreeSet<String>, Vec<String>);
 
-/// The `pasa_cpp` directory containing a built `pasa` binary, if findable.
-pub fn pasa_cpp_dir() -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(d) = std::env::var("COMBINR_PASA_DIR") {
-        candidates.push(PathBuf::from(d).join("pasa_cpp"));
+pub fn data_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data")
+}
+
+/// `(input, golden)` pairs for the assembler golden (vendored
+/// `pasa_cpp_sample_input*` + their C++ `pasa` reference output).
+pub fn assembler_fixtures() -> Vec<(PathBuf, PathBuf)> {
+    let dir = data_dir().join("assembler");
+    let mut v = Vec::new();
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        let name = p.file_name().unwrap().to_str().unwrap().to_string();
+        if name.starts_with("pasa_cpp_sample_input") && !name.ends_with(".golden") {
+            v.push((dir.join(&name), dir.join(format!("{name}.golden"))));
+        }
     }
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    candidates.push(manifest.join("PASApipeline/pasa_cpp"));
-    candidates.push(manifest.join("../PASApipeline/pasa_cpp"));
-    candidates.push(PathBuf::from("/home/matt/PASApipeline/pasa_cpp"));
-
-    candidates.into_iter().find(|d| d.join("pasa").exists())
-}
-
-/// The compiled `pasa` binary, if findable.
-pub fn pasa_binary() -> Option<PathBuf> {
-    pasa_cpp_dir().map(|d| d.join("pasa"))
-}
-
-/// All `pasa_cpp_sample_input*` text inputs in `dir`, sorted.
-pub fn sample_inputs(dir: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("pasa_cpp_sample_input"))
-                .unwrap_or(false)
-                && !matches!(
-                    p.extension().and_then(|e| e.to_str()),
-                    Some("o") | Some("output")
-                )
-        })
-        .collect();
     v.sort();
     v
 }
 
-/// Parse the `pasa`/`assemble-tokens` `assembly: ...` lines into a canonical set
+/// `(input, golden)` pairs for the alt-splice golden (input GTF/GFF3 +
+/// PASA-derived event reference).
+pub fn altsplice_fixtures() -> Vec<(PathBuf, PathBuf)> {
+    let dir = data_dir().join("altsplice");
+    let mut v = Vec::new();
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        let name = p.file_name().unwrap().to_str().unwrap().to_string();
+        if (name.ends_with(".gtf") || name.ends_with(".gff3")) && !name.contains(".events.golden") {
+            let stem = name.rsplit_once('.').unwrap().0;
+            v.push((dir.join(&name), dir.join(format!("{stem}.events.golden"))));
+        }
+    }
+    v.sort();
+    v
+}
+
+fn strand_str(s: Strand) -> String {
+    match s {
+        Strand::Plus => "+",
+        Strand::Minus => "-",
+        Strand::Unknown => "?",
+    }
+    .to_string()
+}
+
+/// Parse `pasa`/`assemble-tokens` `assembly: ...` lines into a canonical set
 /// (member set + structure orient/segments, ignoring the assembly title).
 pub fn parse_assemblies(text: &str) -> BTreeSet<CanonAssembly> {
     let mut out = BTreeSet::new();
@@ -74,6 +83,51 @@ pub fn parse_assemblies(text: &str) -> BTreeSet<CanonAssembly> {
         out.insert((member_set, fields));
     }
     out
+}
+
+/// Canonicalize a combinr [`ClusterAssembly`] the same way [`parse_assemblies`]
+/// canonicalizes a golden line.
+pub fn canon_from_cluster(a: &ClusterAssembly) -> CanonAssembly {
+    let members: BTreeSet<String> = a.contained_accs.iter().cloned().collect();
+    let mut fields = vec![strand_str(a.orient)];
+    for s in &a.structure.segments {
+        fields.push(format!("{}-{}", s.coords.lend, s.coords.rend));
+    }
+    (members, fields)
+}
+
+/// Canonicalize combinr events to the golden event line form
+/// `event_type \t coords \t isoform_a \t isoform_b` (coords lend-sorted).
+pub fn canon_events(events: &[EventRecord]) -> BTreeSet<String> {
+    events
+        .iter()
+        .map(|e| {
+            let mut segs = e.coords.clone();
+            segs.sort_by_key(|c| c.lend);
+            let coords = segs
+                .iter()
+                .map(|c| format!("{}-{}", c.lend, c.rend))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{}\t{}\t{}\t{}",
+                e.kind.as_str(),
+                coords,
+                e.isoform_a,
+                e.isoform_b
+            )
+        })
+        .collect()
+}
+
+/// Load a golden text file as a set of non-empty trimmed lines.
+pub fn load_lines(path: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {

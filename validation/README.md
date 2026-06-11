@@ -1,18 +1,24 @@
-# Validation: alt-splice cross-check against PASA
+# Validation: regenerating the PASA golden references
 
-`combinr`'s assembler is verified byte-for-byte against the original C++ `pasa`
-binary (see the `tests/golden_*` suite). This directory cross-checks **Algorithm
-2 (alternative splicing)** against PASA's actual Perl implementation,
-`CDNA::Alternative_splice_comparer` — the module that generates PASA's alt-splice
-report.
+The `tests/golden_*` suite compares combinr against **committed** PASA reference
+outputs under `tests/data/` — so `cargo test` runs no PASA code. This directory
+holds the tooling that *generated* those goldens from a PASA checkout:
+
+- `regenerate_goldens.sh` — rebuilds every golden under `tests/data/` (the C++
+  `pasa` assembler output for Algorithm 1, and the alt-splice events for
+  Algorithm 2). Run `PASA=/path/to/PASApipeline ./validation/regenerate_goldens.sh`
+  from the crate root.
+- `pasa_altsplice_xcheck.pl` — drives PASA's real
+  `CDNA::Alternative_splice_comparer` (the module that produces PASA's alt-splice
+  report) on combinr's emitted isoforms; used both to generate the alt-splice
+  golden and for ad-hoc cross-checks on larger datasets.
+
+## How the alt-splice cross-check works
 
 PASA's alt-splice analysis is normally database-bound (`.dbi` scripts), so there
 is no standalone binary to diff against. But the classification *logic* lives in
-a pure-Perl module that loads without a database. `pasa_altsplice_xcheck.pl`
-drives that module directly on the **same isoform structures combinr produces**,
-then emits canonical events to compare against combinr's own report.
-
-## How it works
+a pure-Perl module that loads without a database, which the harness drives
+directly:
 
 1. Run `combinr altsplice` on some input, producing the isoform GFF3 and the
    event TSV.

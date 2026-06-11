@@ -1,56 +1,98 @@
-//! Golden parity for the assembler core (M1): for every
-//! `pasa_cpp_sample_input*`, run both the compiled C++ `pasa` binary and
-//! `combinr assemble-tokens` and assert identical assembly *sets* (member sets +
-//! merged structures). Sets, not line order, because tied `lend` values make the
-//! C++ `std::sort` (unstable) and Rust's stable sort number members differently
-//! without ever changing which assemblies are produced.
+//! Assembler golden parity (Algorithm 1) against committed PASA references.
 //!
-//! Skips with a notice if the reference `pasa` binary cannot be found (build it
-//! with `make` in `pasa_cpp`, or point `$COMBINR_PASA_DIR` at the PASA root).
+//! For every vendored `pasa_cpp_sample_input*`, the original C++ `pasa` binary's
+//! assembly output is committed under `tests/data/assembler/*.golden`. Three
+//! combinr code paths — the raw assembler, the orientation wrapper, and the full
+//! GFF3 pipeline — must each reproduce that golden assembly set (member sets +
+//! merged structures). Set comparison, not line order: tied `lend` values make
+//! the C++ `std::sort` and Rust's stable sort number members differently without
+//! ever changing which assemblies are produced. No PASA code runs here.
 
 mod common;
 
-use std::process::Command;
+use combinr::assemble::{Assembler, assemble_cluster};
+use combinr::filter::Filters;
+use combinr::model::{Alignment, Strand};
+use combinr::pipeline::assemble_sources;
+use combinr::token::parse_tokens;
+use std::collections::BTreeSet;
+use std::io::Write;
 
+fn read(p: &std::path::Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))
+}
+
+/// The raw assembler (`assemble-tokens` path) vs golden.
 #[test]
-fn assembler_matches_golden_pasa_on_all_samples() {
-    let Some(pasa) = common::pasa_binary() else {
-        eprintln!("SKIP: reference `pasa` binary not found (set $COMBINR_PASA_DIR or build it)");
-        return;
-    };
-    let dir = pasa.parent().unwrap().to_path_buf();
-    let combinr = env!("CARGO_BIN_EXE_combinr");
-
-    let inputs = common::sample_inputs(&dir);
-    assert!(!inputs.is_empty(), "no sample inputs in {}", dir.display());
-
-    let mut checked = 0;
-    for input in &inputs {
-        let golden = Command::new(&pasa).arg(input).output().expect("run pasa");
-        let expected = common::parse_assemblies(&String::from_utf8_lossy(&golden.stdout));
-
-        let mine = Command::new(combinr)
-            .args(["assemble-tokens", input.to_str().unwrap()])
-            .output()
-            .expect("run combinr");
-        assert!(
-            mine.status.success(),
-            "combinr failed on {}: {}",
-            input.display(),
-            String::from_utf8_lossy(&mine.stderr)
-        );
-        let got = common::parse_assemblies(&String::from_utf8_lossy(&mine.stdout));
-
+fn raw_assembler_matches_golden() {
+    let fixtures = common::assembler_fixtures();
+    assert!(!fixtures.is_empty(), "no assembler fixtures vendored");
+    for (input, golden) in fixtures {
+        let aligns = parse_tokens(&read(&input), input.to_str().unwrap()).unwrap();
+        let mut asm = Assembler::new(aligns);
+        asm.assemble().unwrap();
+        let got = common::parse_assemblies(&asm.format_pasa_assemblies());
+        let expected = common::parse_assemblies(&read(&golden));
         assert_eq!(
             got,
             expected,
-            "assembly set mismatch on {}\n  only in combinr: {:?}\n  only in pasa: {:?}",
-            input.display(),
-            got.difference(&expected).collect::<Vec<_>>(),
-            expected.difference(&got).collect::<Vec<_>>(),
+            "raw assembler mismatch on {}",
+            input.display()
         );
-        checked += 1;
     }
-    assert!(checked > 0);
-    eprintln!("golden parity: {checked} sample inputs matched");
+}
+
+/// The orientation wrapper (`assemble_cluster`) vs golden.
+#[test]
+fn orientation_wrapper_matches_golden() {
+    for (input, golden) in common::assembler_fixtures() {
+        let aligns = parse_tokens(&read(&input), input.to_str().unwrap()).unwrap();
+        let got: BTreeSet<common::CanonAssembly> = assemble_cluster(&aligns, 20)
+            .unwrap()
+            .iter()
+            .map(common::canon_from_cluster)
+            .collect();
+        let expected = common::parse_assemblies(&read(&golden));
+        assert_eq!(got, expected, "wrapper mismatch on {}", input.display());
+    }
+}
+
+/// The full GFF3 pipeline (`assemble_sources`) vs golden: round-trip each token
+/// input through a cDNA_match GFF3 to exercise parsing + clustering too.
+#[test]
+fn gff3_pipeline_matches_golden() {
+    for (input, golden) in common::assembler_fixtures() {
+        let aligns = parse_tokens(&read(&input), input.to_str().unwrap()).unwrap();
+        let gff = token_to_gff3(&aligns, "chr1");
+        let mut tmp = tempfile::Builder::new().suffix(".gff3").tempfile().unwrap();
+        tmp.write_all(gff.as_bytes()).unwrap();
+
+        let asms = assemble_sources(&[tmp.path().to_path_buf()], 20, &Filters::none()).unwrap();
+        let got: BTreeSet<common::CanonAssembly> =
+            asms.iter().map(common::canon_from_cluster).collect();
+        let expected = common::parse_assemblies(&read(&golden));
+        assert_eq!(got, expected, "pipeline mismatch on {}", input.display());
+    }
+}
+
+fn token_to_gff3(aligns: &[Alignment], contig: &str) -> String {
+    let mut s = String::from("##gff-version 3\n");
+    for a in aligns {
+        let orient = match a.aligned_orient {
+            Strand::Plus => '+',
+            Strand::Minus => '-',
+            Strand::Unknown => '.',
+        };
+        let mut cdna = 0i64;
+        for seg in &a.segments {
+            let len = seg.coords.rend - seg.coords.lend + 1;
+            let (cl, cr) = (cdna + 1, cdna + len);
+            cdna += len;
+            s.push_str(&format!(
+                "{contig}\tt\tcDNA_match\t{}\t{}\t.\t{orient}\t.\tID={};Target={} {cl} {cr}\n",
+                seg.coords.lend, seg.coords.rend, a.acc, a.acc
+            ));
+        }
+    }
+    s
 }

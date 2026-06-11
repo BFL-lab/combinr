@@ -1,0 +1,3 @@
+alt_acceptor	1400-1420	locus_1.iso1	locus_1.iso3
+exon_skip	1400-1600	locus_1.iso3	locus_1.iso2
+exon_skip	1420-1600	locus_1.iso1	locus_1.iso2

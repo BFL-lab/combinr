@@ -1,0 +1,8 @@
+chr1	d	exon	1000	1200	.	+	.	gene_id "g"; transcript_id "iso1";
+chr1	d	exon	1400	1600	.	+	.	gene_id "g"; transcript_id "iso1";
+chr1	d	exon	1800	2000	.	+	.	gene_id "g"; transcript_id "iso1";
+chr1	d	exon	1000	1200	.	+	.	gene_id "g"; transcript_id "iso2";
+chr1	d	exon	1800	2000	.	+	.	gene_id "g"; transcript_id "iso2";
+chr1	d	exon	1000	1200	.	+	.	gene_id "g"; transcript_id "iso3";
+chr1	d	exon	1420	1600	.	+	.	gene_id "g"; transcript_id "iso3";
+chr1	d	exon	1800	2000	.	+	.	gene_id "g"; transcript_id "iso3";
