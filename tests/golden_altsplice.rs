@@ -3,8 +3,8 @@
 //! For each vendored input under `tests/data/altsplice/`, PASA's real
 //! `CDNA::Alternative_splice_comparer` was run on combinr's emitted isoforms and
 //! its events committed as `*.events.golden`. combinr's own classification must
-//! reproduce that exact event set. No PASA code runs here (the regeneration
-//! harness lives in `validation/`).
+//! reproduce that exact event set. No PASA code runs here; the one-off
+//! generation harness is preserved in git history.
 //!
 //! Scope: because the golden is PASA's comparer applied to *combinr's* isoforms,
 //! this validates the alt-splice **classification logic** against PASA — not

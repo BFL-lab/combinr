@@ -3,8 +3,8 @@
 //! Golden references are committed under `tests/data/` (generated once from the
 //! original PASA C++ `pasa` binary and the PASA `Alternative_splice_comparer`
 //! Perl module). The tests compare combinr's output against these fixtures, so
-//! **no PASA code runs at test time**. See `validation/` for how the goldens are
-//! regenerated.
+//! **no PASA code runs at test time**. They are a frozen snapshot; the one-off
+//! generation tooling is preserved in git history.
 
 #![allow(dead_code)]
 
