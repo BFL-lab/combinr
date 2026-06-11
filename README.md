@@ -3,7 +3,7 @@
 `combinr` reimplements the two genuinely useful algorithms from
 [PASA](https://github.com/PASApipeline/PASApipeline) as a single self-contained
 Rust binary — no database, no Trinity requirement, and input from any source as
-long as it is GTF or GFF3:
+long as it is GTF, GFF3, or BAM:
 
 1. **Combine** multiple transcript-alignment sources into one **non-redundant**
    assembly set. A faithful port of PASA's C++ `pasa` assembler and its
@@ -41,8 +41,8 @@ cargo build --release
 ## Usage
 
 ```sh
-# 1) Combine sources into a non-redundant GFF3 (multiple -i, GTF and/or GFF3)
-combinr assemble -i sampleA.gtf -i sampleB.gff3 > assemblies.gff3
+# 1) Combine sources into a non-redundant GFF3 (multiple -i, GTF/GFF3/BAM, mixed)
+combinr assemble -i sampleA.gtf -i sampleB.gff3 -i reads.bam > assemblies.gff3
 
 # 2) Model alternative splicing (isoform GFF3 to stdout, events to a TSV)
 combinr altsplice -i sampleA.gtf -i sampleB.gff3 --events events.tsv > isoforms.gff3
@@ -56,15 +56,23 @@ combinr run -i samples.gtf [--gene-pred p.gff3 --genome genome.fa] --events even
 ```
 
 Global options: `--format gff3|gtf`, `--fuzzlength <bp>` (default 20),
-`--threads <n>`, and the off-by-default quality filters `--min-avg-per-id`,
-`--min-intron`, `--max-intron`.
+`--threads <n>`, and the quality filters `--min-avg-per-id` and `--min-intron`
+(off by default) plus `--max-intron` (defaults to 100000 bp, matching PASA's
+`MAX_INTRON_LENGTH`, to drop spurious long-range junctions; pass `--max-intron 0`
+to disable the cap).
 
 ## Input
 
-- **Transcript files** (`-i`, repeatable; GTF and/or GFF3, mixed allowed). GFF3
-  is accepted as `cDNA_match`+`Target` alignment rows or as plain
+- **Transcript files** (`-i`, repeatable; GTF, GFF3, and/or BAM, mixed allowed).
+  GFF3 is accepted as `cDNA_match`+`Target` alignment rows or as plain
   `gene`/`mRNA`/`exon` models; GTF as `exon` rows grouped by `transcript_id`.
   Each file's basename is recorded as provenance.
+- **BAM** (auto-detected by the `.bam` extension): a cDNA/transcript-to-genome
+  alignment from a splice-aware mapper (segemehl, `minimap2 -ax splice`, STAR,
+  HISAT2, …). One primary mapped record becomes one transcript; exon blocks come
+  from the CIGAR (a `N` skip is an intron; `D`/`I` stay within an exon); the
+  transcribed strand is read from the `XS:A` tag (else left undetermined and
+  resolved during assembly). CRAM and plain-text SAM are not supported.
 - **Gene-prediction GFF3** (`--gene-pred`, ORF step only): `CDS` rows grouped by
   mRNA `Parent`.
 - **Genome FASTA** (`--genome`, ORF step only).

@@ -25,15 +25,17 @@ pub struct Cli {
     #[arg(short = 't', long, global = true)]
     pub threads: Option<usize>,
 
-    // ---- optional, off-by-default quality filters ----
-    /// Drop alignments whose average percent identity is below this.
+    // ---- pre-assembly quality filters ----
+    /// Drop alignments whose average percent identity is below this (off by default).
     #[arg(long, global = true)]
     pub min_avg_per_id: Option<f64>,
-    /// Drop alignments containing an intron shorter than this (bp).
+    /// Drop alignments containing an intron shorter than this (bp) (off by default).
     #[arg(long, global = true)]
     pub min_intron: Option<i64>,
-    /// Drop alignments containing an intron longer than this (bp).
-    #[arg(long, global = true)]
+    /// Drop alignments containing an intron longer than this (bp). Defaults to
+    /// 100000 (matching PASA's MAX_INTRON_LENGTH) to discard spurious long-range
+    /// junctions; pass 0 (or a negative value) to disable the cap.
+    #[arg(long, global = true, default_value = "100000")]
     pub max_intron: Option<i64>,
 
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
@@ -68,13 +70,16 @@ pub enum Command {
 
 #[derive(Parser, Debug)]
 pub struct AssembleArgs {
-    /// One or more transcript files (GTF and/or GFF3); repeatable.
+    /// One or more transcript files (GTF, GFF3, and/or BAM); repeatable.
+    /// BAM is auto-detected by the `.bam` extension; CRAM and text SAM are not
+    /// supported.
     #[arg(short, long, required = true)]
     pub input: Vec<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
 pub struct AltspliceArgs {
+    /// One or more transcript files (GTF, GFF3, and/or BAM); repeatable.
     #[arg(short, long, required = true)]
     pub input: Vec<PathBuf>,
     /// Path for the tab-separated alt-splice event report.
@@ -84,6 +89,7 @@ pub struct AltspliceArgs {
 
 #[derive(Parser, Debug)]
 pub struct OrfArgs {
+    /// One or more transcript files (GTF, GFF3, and/or BAM); repeatable.
     #[arg(short, long, required = true)]
     pub input: Vec<PathBuf>,
     /// Gene-prediction GFF3 carrying CDS features.
@@ -99,6 +105,7 @@ pub struct OrfArgs {
 
 #[derive(Parser, Debug)]
 pub struct RunArgs {
+    /// One or more transcript files (GTF, GFF3, and/or BAM); repeatable.
     #[arg(short, long, required = true)]
     pub input: Vec<PathBuf>,
     /// Gene-prediction GFF3 with CDS (enables the ORF/UTR step when given).

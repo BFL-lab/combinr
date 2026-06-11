@@ -3,6 +3,7 @@
 //! idiosyncratic readers (1-based inclusive coords, `.` percent-id → 100,
 //! Target-token accessions) and to keep the binary self-contained.
 
+pub mod bam;
 pub mod fasta;
 pub mod gff3;
 pub mod gtf;
@@ -21,6 +22,9 @@ use std::sync::Arc;
 pub enum Format {
     Gff3,
     Gtf,
+    /// Binary BAM. Detected and dispatched before any text read (see
+    /// [`is_bam`]); never produced by [`detect_format`], which only sees text.
+    Bam,
 }
 
 /// Load and concatenate alignments from several source files, stamping each with
@@ -28,16 +32,23 @@ pub enum Format {
 pub fn load_sources(paths: &[PathBuf]) -> Result<Vec<Alignment>> {
     let mut out = Vec::new();
     for path in paths {
+        let source = basename(path);
+        // BAM is binary: dispatch it before any attempt to read the file as text.
+        if is_bam(path)? {
+            let mut aligns = bam::parse(path, &source)?;
+            out.append(&mut aligns);
+            continue;
+        }
         let text = std::fs::read_to_string(path).map_err(|e| CombinrError::Parse {
             file: path.display().to_string(),
             line: 0,
             msg: format!("cannot read: {e}"),
         })?;
-        let source = basename(path);
         let fmt = detect_format(path, &text);
         let mut aligns = match fmt {
             Format::Gff3 => gff3::parse(&text, &source)?,
             Format::Gtf => gtf::parse(&text, &source)?,
+            Format::Bam => unreachable!("BAM is handled before read_to_string"),
         };
         out.append(&mut aligns);
     }
@@ -49,6 +60,31 @@ fn basename(path: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("<input>")
         .to_string()
+}
+
+/// `true` if `path` is a BAM file: a `.bam` extension (case-insensitive) backed
+/// by the BGZF/gzip magic prefix `1f 8b`. A `.bam` file lacking the magic is a
+/// parse error (so a mislabeled text file fails clearly instead of being read as
+/// text). CRAM and plain-text SAM are not recognized here.
+fn is_bam(path: &Path) -> Result<bool> {
+    let has_bam_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("bam"));
+    if !has_bam_ext {
+        return Ok(false);
+    }
+    use std::io::Read;
+    let mut magic = [0u8; 2];
+    match std::fs::File::open(path)?.read_exact(&mut magic) {
+        Ok(()) if magic == [0x1f, 0x8b] => Ok(true),
+        Ok(()) => Err(CombinrError::Parse {
+            file: path.display().to_string(),
+            line: 0,
+            msg: "has a .bam extension but is not BGZF/BAM (missing 1f 8b magic)".to_string(),
+        }),
+        Err(e) => Err(CombinrError::Io(e)),
+    }
 }
 
 /// Detect format by extension, falling back to a content sniff.

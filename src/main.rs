@@ -28,7 +28,8 @@ fn main() -> Result<()> {
     let filters = Filters {
         min_avg_per_id: args.min_avg_per_id,
         min_intron: args.min_intron,
-        max_intron: args.max_intron,
+        // --max-intron defaults to 100000; 0 or negative disables the cap.
+        max_intron: args.max_intron.filter(|&n| n > 0),
     };
     let fuzz = args.fuzzlength;
     let fmt = args.format;
