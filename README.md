@@ -81,13 +81,19 @@ Global options: `--format gff3|gtf`, `--fuzzlength <bp>` (default 20),
 ## Correctness
 
 The assembler core is validated against the original compiled C++ `pasa` binary:
-`tests/golden_assembler.rs` and `tests/golden_pipeline.rs` run both on every
-bundled `pasa_cpp/pasa_cpp_sample_input*` and assert identical assembly sets. To
-enable those tests, build the reference binary first:
+`tests/golden_assembler.rs`, `tests/golden_wrapper.rs`, and
+`tests/golden_pipeline.rs` run both on every `pasa_cpp_sample_input*` and assert
+identical assembly sets. Build the reference binary first:
 
 ```sh
-( cd PASApipeline/pasa_cpp && make )   # produces ./pasa
+( cd /path/to/PASApipeline/pasa_cpp && make )   # produces ./pasa
 cargo test
 ```
 
-(The golden tests skip gracefully if the `pasa` binary is absent.)
+The tests locate the reference automatically — `$COMBINR_PASA_DIR` (the
+PASApipeline root) if set, else `PASApipeline/` inside the crate, else
+`../PASApipeline/` beside it — and skip gracefully if no `pasa` binary is found.
+
+combinr has also been validated end-to-end on PASA's own `sample_data` (a 55k-row
+cDNA_match GFF3 + a StringTie GTF → 1334 assemblies; with the bundled gene
+annotations + genome → CDS/UTR-annotated isoforms).
