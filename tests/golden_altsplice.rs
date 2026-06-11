@@ -5,6 +5,12 @@
 //! its events committed as `*.events.golden`. combinr's own classification must
 //! reproduce that exact event set. No PASA code runs here (the regeneration
 //! harness lives in `validation/`).
+//!
+//! Scope: because the golden is PASA's comparer applied to *combinr's* isoforms,
+//! this validates the alt-splice **classification logic** against PASA — not
+//! combinr's isoform/locus construction. The underlying assembly is validated
+//! separately against PASA's C++ assembler in `golden_assembler.rs`; locus
+//! grouping is combinr-specific and covered by unit tests in `altsplice::locus`.
 
 mod common;
 

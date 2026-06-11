@@ -62,3 +62,11 @@ Run on PASA's bundled `sample_data` (`v2.5.3`):
 **Exact agreement** across all seven event types (retained intron, alt
 acceptor, alt donor, start/end-within-intron, exon skip, alternate exon) on
 1,812 isoforms and 478 events — zero discrepancies.
+
+## Scope
+
+Because PASA's comparer is run on *combinr's* isoforms, this validates the
+alt-splice **classification logic** against PASA — not combinr's isoform/locus
+construction. Algorithm 1 (assembly) is validated against PASA's C++ assembler by
+`tests/golden_assembler.rs`; the locus-grouping glue between the two is
+combinr-specific and covered by the `altsplice::locus` unit tests.
