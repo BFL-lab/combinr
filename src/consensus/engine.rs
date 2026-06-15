@@ -53,6 +53,9 @@ pub struct CalledGene {
     pub partial3: bool,
     pub score: f64,
     pub support: SupportFlags,
+    /// True for a transcript-ORF gene recovered at a locus with no consensus CDS
+    /// (`--promote-transcript-orfs`), vs. a trellis-derived consensus gene.
+    pub promoted: bool,
 }
 
 const MAX_RECURSION_DEPTH: usize = 32;
@@ -256,6 +259,7 @@ fn resolve(
         partial3: !has_stop || !hit_stop,
         score: g.score,
         support,
+        promoted: false,
     }
 }
 
@@ -452,7 +456,7 @@ mod tests {
         // A 200-bp genome of 'C' with a minus-strand single-exon prediction 50..120.
         // On the minus strand the coding reads revcomp(C-run)=G-run -> no stop, so the
         // single exon survives and must come back at its forward coordinates with '-'.
-        let g = write_fasta(&vec![b'C'; 200]);
+        let g = write_fasta(&[b'C'; 200]);
         let chains = vec![chain(
             EvClass::AbinitioPrediction,
             1.0,
@@ -477,7 +481,7 @@ mod tests {
 
     #[test]
     fn forward_strand_gene_called_in_place() {
-        let g = write_fasta(&vec![b'C'; 200]);
+        let g = write_fasta(&[b'C'; 200]);
         // forward single-exon prediction; revcomp not needed
         let chains = vec![chain(
             EvClass::AbinitioPrediction,

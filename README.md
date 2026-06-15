@@ -11,8 +11,8 @@ from any source as long as it is GTF, GFF3, or BAM:
    its orientation wrapper.
 2. **Model alternative splicing** between the resulting isoforms (`altsplice`:
    retained intron, alternate donor/acceptor, transcription-start / polyA within an
-   intron, exon skipping, alternate terminal exons), with an **optional** step
-   (`orf`) that reconciles an external gene-prediction CDS onto the isoforms to derive
+   intron, exon skipping, alternate terminal exons); `run --gene-pred --genome`
+   additionally reconciles an external gene-prediction CDS onto the isoforms to derive
    CDS + 5'/3' UTRs.
 3. **Build consensus gene models** (`consensus`) by integrating *weighted*
    heterogeneous evidence — ab-initio gene predictions, protein alignments,
@@ -47,7 +47,7 @@ coding structure).
   exon structure to the first in-frame stop (a premature stop becomes that
   isoform's ORF stop). Multiple coding models per locus are supported.
 - **Genetic code.** Divergent-isoform stop detection uses the standard code
-  (NCBI table 1) by default; pass `--genetic-code/-g <id>` to the `orf`/`run`/`consensus`
+  (NCBI table 1) by default; pass `--genetic-code/-g <id>` to the `run`/`consensus`
   step for a non-standard table. Supported: `1`, `4`, `6`, `10`, `12`, `26`
   (only stop assignments differ between these; matching isoforms inherit the
   predicted CDS and are unaffected by the code).
@@ -80,15 +80,11 @@ combinr assemble -i sampleA.gtf -i sampleB.gff3 -i reads.bam > assemblies.gff3
 # 2) Model alternative splicing (isoform GFF3 to stdout, events to a TSV)
 combinr altsplice -i sampleA.gtf -i sampleB.gff3 --events events.tsv > isoforms.gff3
 
-# 3) Reconcile an external CDS prediction into CDS/UTR annotations
-#    (add --genetic-code/-g for a non-standard table, e.g. -g 6 for ciliates)
-combinr orf -i samples.gtf --gene-pred predictions.gff3 --genome genome.fa \
-    --events events.tsv > annotated.gff3
-
-# 4) Full pipeline (does the ORF step when --gene-pred and --genome are given)
+# 3) Full transcript pipeline; reconciles an external CDS into CDS/UTR when
+#    --gene-pred and --genome are given (add --genetic-code/-g for a non-standard table)
 combinr run -i samples.gtf [--gene-pred p.gff3 --genome genome.fa] --events events.tsv > out.gff3
 
-# 5) Consensus gene models from weighted evidence (EvidenceModeler-style)
+# 4) Consensus gene models from weighted evidence (EvidenceModeler-style)
 combinr consensus --weights weights.txt --genome genome.fa \
     --gene-predictions abinitio.gff3 \
     --protein-alignments proteins.gff3 \
@@ -100,8 +96,10 @@ combinr consensus --weights weights.txt --genome genome.fa \
 off-by-default EVM heuristics `--research-intergenic <bp>` (re-search intergenic gaps
 for missed genes), `--search-long-introns <bp>` (find nested genes in long introns),
 `--extend-terminal-stop` (extend protein/transcript 3' ends to a stop to complete genes),
-`--peak-augment` (boost intergenic scores near start/stop evidence peaks), plus
-`--repeats <gff3>` (mask repeats from scoring).
+`--peak-augment` (boost intergenic scores near start/stop evidence peaks),
+`--promote-transcript-orfs` (at loci with only transcript evidence and no consensus CDS,
+find the longest ORF in the transcripts and emit it, tagged `support=transcript_orf`),
+plus `--repeats <gff3>` (mask repeats from scoring).
 
 Global options: `--format gff3|gtf`, `--fuzzlength <bp>` (default 20),
 `--threads <n>`, and the quality filters `--min-avg-per-id` and `--min-intron`
@@ -121,9 +119,9 @@ to disable the cap).
   from the CIGAR (a `N` skip is an intron; `D`/`I` stay within an exon); the
   transcribed strand is read from the `XS:A` tag (else left undetermined and
   resolved during assembly). CRAM and plain-text SAM are not supported.
-- **Gene-prediction GFF3** (`--gene-pred`, ORF step only): `CDS` rows grouped by
-  mRNA `Parent`.
-- **Genome FASTA** (`--genome`, ORF step and `consensus`).
+- **Gene-prediction GFF3** (`--gene-pred`, the `run` reconcile step only): `CDS` rows
+  grouped by mRNA `Parent`.
+- **Genome FASTA** (`--genome`, the `run` reconcile step and `consensus`).
 - **Consensus evidence** (`consensus`): a `--weights` file (three whitespace columns
   `CLASS TYPE WEIGHT`, where `CLASS` is `PROTEIN`/`TRANSCRIPT`/`ABINITIO_PREDICTION`/
   `OTHER_PREDICTION` and `TYPE` matches the GFF column-2 source) plus the evidence GFF3s:

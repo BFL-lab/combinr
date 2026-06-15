@@ -15,8 +15,10 @@
 //! `orf-from-external-gff3`.
 
 pub mod coords;
+pub mod longest;
 pub mod translate;
 
+pub use longest::{OrfSpan, find_longest_orf};
 pub use translate::GeneticCode;
 
 use crate::altsplice::{EventRecord, Isoform, Locus, RegionClass};

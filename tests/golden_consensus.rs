@@ -39,6 +39,7 @@ fn default_config() -> ConsensusConfig {
         search_long_introns: 0,
         extend_terminal_stop: false,
         peak_augment: false,
+        promote_transcript_orfs: false,
         min_coding_length: 150,
     }
 }
@@ -76,5 +77,24 @@ fn consensus_output_is_deterministic() {
         render(&cfg),
         render(&cfg),
         "consensus output is non-deterministic"
+    );
+}
+
+/// With only transcript evidence and `--promote-transcript-orfs`, every locus is
+/// transcript-only, so the output is all promoted (de-novo ORF) genes, each tagged.
+#[test]
+fn promotion_recovers_transcript_only_loci() {
+    let mut cfg = default_config();
+    cfg.gene_predictions = Vec::new();
+    cfg.protein_alignments = Vec::new();
+    cfg.promote_transcript_orfs = true;
+
+    let gff = render(&cfg);
+    let genes = gff.lines().filter(|l| l.contains("\tgene\t")).count();
+    let promoted = gff.matches("support=transcript_orf").count();
+    assert!(genes > 0, "transcript-only input + promotion yields genes");
+    assert_eq!(
+        genes, promoted,
+        "every gene here is a promoted transcript-ORF"
     );
 }

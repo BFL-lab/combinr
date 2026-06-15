@@ -100,6 +100,7 @@ pub struct ConsensusConfig {
     pub search_long_introns: i64,
     pub extend_terminal_stop: bool,
     pub peak_augment: bool,
+    pub promote_transcript_orfs: bool,
     pub min_coding_length: i64,
 }
 
@@ -164,5 +165,19 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
             )
         })
         .collect();
-    Ok(per_region.into_iter().flatten().collect())
+    let mut genes: Vec<CalledGene> = per_region.into_iter().flatten().collect();
+
+    // Recover transcript-only loci via de-novo ORF (opt-in). Assemble the transcript
+    // alignments (the PASA path) and promote loci with no overlapping consensus gene.
+    if cfg.promote_transcript_orfs && !cfg.transcript_alignments.is_empty() {
+        let asr = analyze_sources(&cfg.transcript_alignments, 20, &Filters::none())?; // PASA fuzz default
+        genes = crate::consensus::promote::promote_and_merge(
+            genes,
+            &asr,
+            &genome,
+            &code,
+            cfg.min_coding_length,
+        );
+    }
+    Ok(genes)
 }

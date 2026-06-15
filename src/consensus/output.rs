@@ -31,12 +31,16 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
             let gene_id = format!("evm.{}.g{}", g.contig, i + 1);
             let lend = gene_lend(g);
             let rend = gene_rend(g);
-            let ratio = if g.support.score_ratio.is_finite() {
+            // Promoted transcript-ORF genes have no consensus noncoding baseline, so the
+            // ratio is reported as NA rather than the placeholder infinity.
+            let ratio = if g.promoted {
+                "NA".to_string()
+            } else if g.support.score_ratio.is_finite() {
                 format!("{:.2}", g.support.score_ratio)
             } else {
                 "inf".to_string()
             };
-            let attrs = vec![
+            let mut attrs = vec![
                 ("score".into(), vec![format!("{:.1}", g.score)]),
                 ("score_ratio".into(), vec![ratio]),
                 (
@@ -50,6 +54,10 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
                 ("partial5".into(), vec![g.partial5.to_string()]),
                 ("partial3".into(), vec![g.partial3.to_string()]),
             ];
+            // Tag only promoted genes, so default consensus output is unchanged.
+            if g.promoted {
+                attrs.insert(0, ("support".into(), vec!["transcript_orf".into()]));
+            }
             OutGene {
                 gene_id: gene_id.clone(),
                 contig: g.contig.clone(),

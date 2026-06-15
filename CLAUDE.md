@@ -8,12 +8,16 @@ A self-contained Rust binary that reimplements evidence-combining genome-annotat
 algorithms from PASA and EVidenceModeler — no Perl, no database. Two families, named by
 the consolidation they perform:
 
-- **`assemble` / `altsplice` / `orf` / `run`** — PASA: merge compatible transcript
-  alignments into non-redundant isoforms (keeps alternatives), classify alt-splice
-  events, and optionally graft an external CDS onto isoforms for CDS/UTR.
+- **`assemble` / `altsplice` / `run`** — PASA: merge compatible transcript alignments into
+  non-redundant isoforms (keeps alternatives), classify alt-splice events; `run
+  --gene-pred --genome` also grafts an external CDS onto isoforms for CDS/UTR (this was the
+  former standalone `orf` subcommand, since removed — the `src/orf/` library stays).
 - **`consensus`** — EVidenceModeler: integrate *weighted* heterogeneous evidence
   (ab-initio predictions, protein/transcript alignments) into one best-scoring coding
-  gene model per locus, via a frame-aware gene-structure DP trellis.
+  gene model per locus, via a frame-aware gene-structure DP trellis. With
+  `--promote-transcript-orfs`, loci with only transcript evidence (no consensus CDS) get a
+  de-novo longest-ORF gene (`orf::find_longest_orf` → `consensus::promote`), tagged
+  `support=transcript_orf`.
 
 ## Conventions (hold across the codebase)
 
@@ -63,8 +67,10 @@ parses the optional mask.
   fixes EVM's bug where an eliminated gene's span blocked re-search.
 - **End-stitching and 5'/start terminal extension are intentionally NOT ported** — they
   rely on canonical splice/ATG scanning that conflicts with the project principle.
-- The standalone `orf` subcommand is **kept** (it grafts a CDS onto PASA-assembled
-  alt-isoforms — distinct from EVM consensus; removing it would regress).
+- Phase 2 (not yet done): emit a locus's alternative transcript isoforms as extra mRNAs
+  anchored on the consensus CDS (grafting the consensus CDS onto each isoform). Phase 1
+  (done) only fills transcript-only loci via de-novo ORF; loci already covered by a real
+  consensus gene are left for Phase 2.
 
 ## Testing
 

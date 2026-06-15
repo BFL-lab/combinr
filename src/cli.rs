@@ -56,13 +56,10 @@ pub enum Command {
     /// Assemble, then classify alternative-splicing events between isoforms.
     Altsplice(AltspliceArgs),
 
-    /// Add CDS/UTR by reconciling an external gene-prediction GFF3.
-    Orf(OrfArgs),
-
     /// Build consensus gene models by integrating weighted evidence (EVM-style).
     Consensus(ConsensusArgs),
 
-    /// Full pipeline: assemble -> altsplice -> (optional) orf.
+    /// Full pipeline: assemble -> altsplice -> (optional) CDS/UTR reconcile.
     Run(RunArgs),
 
     /// Hidden: assemble from the C++ `pasa` token format on stdin/file and emit
@@ -85,26 +82,6 @@ pub struct AltspliceArgs {
     /// One or more transcript files (GTF, GFF3, and/or BAM); repeatable.
     #[arg(short, long, required = true)]
     pub input: Vec<PathBuf>,
-    /// Path for the tab-separated alt-splice event report.
-    #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
-    pub events: PathBuf,
-}
-
-#[derive(Parser, Debug)]
-pub struct OrfArgs {
-    /// One or more transcript files (GTF, GFF3, and/or BAM); repeatable.
-    #[arg(short, long, required = true)]
-    pub input: Vec<PathBuf>,
-    /// Gene-prediction GFF3 carrying CDS features.
-    #[arg(long, required = true)]
-    pub gene_pred: PathBuf,
-    /// Genome FASTA (required for the ORF/UTR step).
-    #[arg(long, required = true)]
-    pub genome: PathBuf,
-    /// NCBI genetic code (translation table) for the ORF/UTR step's stop-codon
-    /// detection. Default 1 (standard). Supported: 1, 4, 6, 10, 12, 26.
-    #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
-    pub genetic_code: u32,
     /// Path for the tab-separated alt-splice event report.
     #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
     pub events: PathBuf,
@@ -165,6 +142,10 @@ pub struct ConsensusArgs {
     /// Boost intergenic scores near start/stop evidence-density peaks. Off by default.
     #[arg(long)]
     pub peak_augment: bool,
+    /// At loci with only transcript evidence (no consensus CDS), find the longest ORF in
+    /// the transcripts and promote it into the output. Off by default.
+    #[arg(long)]
+    pub promote_transcript_orfs: bool,
 }
 
 #[derive(Parser, Debug)]

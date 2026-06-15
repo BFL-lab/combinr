@@ -18,6 +18,7 @@ pub mod exon;
 pub mod filter;
 pub mod grammar;
 pub mod output;
+pub mod promote;
 pub mod region;
 pub mod repeats;
 pub mod sites;

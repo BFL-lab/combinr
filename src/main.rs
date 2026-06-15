@@ -6,8 +6,8 @@ use std::io::{BufWriter, Read, Write};
 mod cli;
 
 use cli::{
-    AltspliceArgs, AssembleArgs, AssembleTokensArgs, Cli, Command, ConsensusArgs, OrfArgs,
-    OutputFormat, RunArgs,
+    AltspliceArgs, AssembleArgs, AssembleTokensArgs, Cli, Command, ConsensusArgs, OutputFormat,
+    RunArgs,
 };
 use combinr::altsplice::EventRecord;
 use combinr::assemble::Assembler;
@@ -17,6 +17,7 @@ use combinr::io::{writer_events, writer_gff3, writer_gtf};
 use combinr::orf::GeneticCode;
 use combinr::pipeline::{analyze_sources, assemble_sources, reconcile_sources};
 use combinr::token::parse_tokens;
+use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
     let args = Cli::parse();
@@ -39,7 +40,6 @@ fn main() -> Result<()> {
     match args.command {
         Command::Assemble(a) => run_assemble(a, fuzz, &filters, fmt),
         Command::Altsplice(a) => run_altsplice(a, fuzz, &filters, fmt),
-        Command::Orf(a) => run_orf(a, fuzz, &filters, fmt),
         Command::Consensus(a) => run_consensus(a, fmt),
         Command::Run(a) => run_run(a, fuzz, &filters, fmt),
         Command::AssembleTokens(a) => run_assemble_tokens(a, fuzz),
@@ -76,15 +76,25 @@ fn run_altsplice(a: AltspliceArgs, fuzz: i64, filters: &Filters, fmt: OutputForm
     Ok(())
 }
 
-/// `orf`: alt-splice + reconcile an external CDS into CDS/UTR.
-fn run_orf(a: OrfArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Result<()> {
-    let code = GeneticCode::from_ncbi_id(a.genetic_code).map_err(anyhow::Error::msg)?;
-    let (isoforms, loci, recon) =
-        reconcile_sources(&a.input, &a.gene_pred, &a.genome, fuzz, filters, code)
-            .with_context(|| "reconciling ORF/UTR")?;
+/// Reconcile an external CDS prediction onto assembled isoforms (the former `orf`
+/// subcommand; now reachable only via `run --gene-pred --genome`).
+#[allow(clippy::too_many_arguments)]
+fn reconcile_orf(
+    input: &[PathBuf],
+    gene_pred: &Path,
+    genome: &Path,
+    genetic_code: u32,
+    events: &Path,
+    fuzz: i64,
+    filters: &Filters,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let code = GeneticCode::from_ncbi_id(genetic_code).map_err(anyhow::Error::msg)?;
+    let (isoforms, loci, recon) = reconcile_sources(input, gene_pred, genome, fuzz, filters, code)
+        .with_context(|| "reconciling ORF/UTR")?;
     let genes = from_annotated_loci(&isoforms, &loci, &recon.isoform_codings);
     write_models(&genes, fmt)?;
-    write_events_file(&recon.events, &a.events)?;
+    write_events_file(&recon.events, events)?;
     let coding = recon
         .isoform_codings
         .iter()
@@ -95,7 +105,7 @@ fn run_orf(a: OrfArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Resul
         isoforms.len(),
         loci.len(),
         recon.events.len(),
-        a.events.display()
+        events.display()
     );
     Ok(())
 }
@@ -104,14 +114,12 @@ fn run_orf(a: OrfArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Resul
 /// are given, otherwise stops after alt-splice.
 fn run_run(a: RunArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Result<()> {
     match (a.gene_pred, a.genome) {
-        (Some(gp), Some(g)) => run_orf(
-            OrfArgs {
-                input: a.input,
-                gene_pred: gp,
-                genome: g,
-                genetic_code: a.genetic_code,
-                events: a.events,
-            },
+        (Some(gp), Some(g)) => reconcile_orf(
+            &a.input,
+            &gp,
+            &g,
+            a.genetic_code,
+            &a.events,
             fuzz,
             filters,
             fmt,
@@ -156,18 +164,20 @@ fn run_consensus(a: ConsensusArgs, fmt: OutputFormat) -> Result<()> {
         search_long_introns: a.search_long_introns,
         extend_terminal_stop: a.extend_terminal_stop,
         peak_augment: a.peak_augment,
+        promote_transcript_orfs: a.promote_transcript_orfs,
         min_coding_length: 150,
     };
 
     let genes = consensus_sources(&cfg).with_context(|| "building consensus gene models")?;
     let plus = genes.iter().filter(|g| g.orient == Strand::Plus).count();
     let low = genes.iter().filter(|g| g.support.low_support).count();
+    let promoted = genes.iter().filter(|g| g.promoted).count();
 
     let out_genes = to_out_genes(&genes);
     write_models(&out_genes, fmt)?;
 
     eprintln!(
-        "combinr consensus: {} gene(s) ({} +, {} -); {} flagged low_support{}",
+        "combinr consensus: {} gene(s) ({} +, {} -); {} flagged low_support{}; {promoted} promoted transcript-ORF",
         genes.len(),
         plus,
         genes.len() - plus,
