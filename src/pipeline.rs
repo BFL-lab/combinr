@@ -1,7 +1,7 @@
 //! End-to-end orchestration: load sources → (filter) → cluster → assemble each
 //! cluster in parallel, and (for alt-splice) group into loci and classify events.
 
-use crate::altsplice::{AltSpliceResult, Isoform, Locus, analyze};
+use crate::altsplice::{AltSpliceResult, EventRecord, Isoform, Locus, analyze};
 use crate::assemble::{ClusterAssembly, assemble_cluster};
 use crate::cluster::cluster_alignments;
 use crate::consensus::evidence::load_evidence;
@@ -13,6 +13,7 @@ use crate::error::{CombinrError, Result};
 use crate::filter::{self, Filters};
 use crate::io::fasta::Fasta;
 use crate::io::load_sources;
+use crate::io::out_model::OutGene;
 use crate::orf::{GeneticCode, ReconcileResult, parse_cds_models, reconcile};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -101,6 +102,7 @@ pub struct ConsensusConfig {
     pub extend_terminal_stop: bool,
     pub peak_augment: bool,
     pub promote_transcript_orfs: bool,
+    pub alt_splice: bool,
     pub min_coding_length: i64,
 }
 
@@ -180,4 +182,21 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
         );
     }
     Ok(genes)
+}
+
+/// `consensus --alt-splice`: build the consensus genes, then attach each locus's
+/// alternative transcript isoforms as extra mRNAs (CDS grafted from the consensus). Returns
+/// the output genes and the region-tagged alt-splice events.
+pub fn consensus_with_isoforms(cfg: &ConsensusConfig) -> Result<(Vec<OutGene>, Vec<EventRecord>)> {
+    let genes = consensus_sources(cfg)?;
+    let genome = Fasta::load(&cfg.genome)?;
+    let code = GeneticCode::from_ncbi_id(cfg.genetic_code).map_err(|msg| CombinrError::Parse {
+        file: "genetic-code".into(),
+        line: 0,
+        msg,
+    })?;
+    let asr = analyze_sources(&cfg.transcript_alignments, 20, &Filters::none())?; // PASA fuzz default
+    Ok(crate::consensus::altsplice::annotate(
+        &genes, asr, &genome, &code,
+    ))
 }

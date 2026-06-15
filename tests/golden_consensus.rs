@@ -40,6 +40,7 @@ fn default_config() -> ConsensusConfig {
         extend_terminal_stop: false,
         peak_augment: false,
         promote_transcript_orfs: false,
+        alt_splice: false,
         min_coding_length: 150,
     }
 }
@@ -96,5 +97,31 @@ fn promotion_recovers_transcript_only_loci() {
     assert_eq!(
         genes, promoted,
         "every gene here is a promoted transcript-ORF"
+    );
+}
+
+/// `--alt-splice` attaches each consensus locus's transcript isoforms as extra mRNAs and
+/// emits region-tagged events.
+#[test]
+fn alt_splice_emits_isoform_mrnas_and_events() {
+    use combinr::pipeline::consensus_with_isoforms;
+
+    let mut cfg = default_config();
+    cfg.alt_splice = true;
+    let (genes, events) = consensus_with_isoforms(&cfg).expect("consensus_with_isoforms");
+
+    let mrnas: usize = genes.iter().map(|g| g.transcripts.len()).sum();
+    assert!(
+        mrnas > genes.len(),
+        "alt-splice adds isoform mRNAs beyond one per gene"
+    );
+    assert!(!events.is_empty(), "alt-splice emits region-tagged events");
+    assert!(
+        genes.iter().all(|g| {
+            g.transcripts
+                .iter()
+                .any(|t| t.transcript_id.ends_with(".consensus"))
+        }),
+        "every gene keeps its consensus mRNA"
     );
 }

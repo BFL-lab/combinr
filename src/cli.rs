@@ -146,6 +146,14 @@ pub struct ConsensusArgs {
     /// the transcripts and promote it into the output. Off by default.
     #[arg(long)]
     pub promote_transcript_orfs: bool,
+    /// Emit each consensus locus's alternative transcript isoforms as additional mRNAs,
+    /// with CDS derived from the consensus; also writes a region-tagged events TSV
+    /// (`--events`). Off by default.
+    #[arg(long)]
+    pub alt_splice: bool,
+    /// Path for the alt-splice events TSV (used with `--alt-splice`).
+    #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
+    pub events: PathBuf,
 }
 
 #[derive(Parser, Debug)]

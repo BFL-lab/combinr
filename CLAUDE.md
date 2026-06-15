@@ -17,7 +17,9 @@ the consolidation they perform:
   gene model per locus, via a frame-aware gene-structure DP trellis. With
   `--promote-transcript-orfs`, loci with only transcript evidence (no consensus CDS) get a
   de-novo longest-ORF gene (`orf::find_longest_orf` → `consensus::promote`), tagged
-  `support=transcript_orf`.
+  `support=transcript_orf`. With `--alt-splice`, each consensus locus also emits its
+  alternative transcript isoforms as extra mRNAs with the consensus CDS grafted on
+  (`consensus::altsplice` → `orf::reconcile`), plus a region-tagged events TSV.
 
 ## Conventions (hold across the codebase)
 
@@ -67,10 +69,10 @@ parses the optional mask.
   fixes EVM's bug where an eliminated gene's span blocked re-search.
 - **End-stitching and 5'/start terminal extension are intentionally NOT ported** — they
   rely on canonical splice/ATG scanning that conflicts with the project principle.
-- Phase 2 (not yet done): emit a locus's alternative transcript isoforms as extra mRNAs
-  anchored on the consensus CDS (grafting the consensus CDS onto each isoform). Phase 1
-  (done) only fills transcript-only loci via de-novo ORF; loci already covered by a real
-  consensus gene are left for Phase 2.
+- The `orf`→`consensus` fold is done: Phase 1 (`--promote-transcript-orfs`) fills
+  transcript-only loci via de-novo ORF; Phase 2 (`--alt-splice`) emits a consensus locus's
+  alternative transcript isoforms as extra mRNAs anchored on the consensus CDS (reusing
+  `orf::reconcile`). Both are opt-in; the default one-model-per-locus output is unchanged.
 
 ## Testing
 

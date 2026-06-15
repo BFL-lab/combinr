@@ -11,6 +11,7 @@
 //! Milestone status: **M0** — scaffolding only (weights parsing, evidence ingestion,
 //! per-contig region clustering). The trellis engine lands in later milestones.
 
+pub mod altsplice;
 pub mod candidates;
 pub mod engine;
 pub mod evidence;

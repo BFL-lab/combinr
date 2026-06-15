@@ -99,7 +99,10 @@ for missed genes), `--search-long-introns <bp>` (find nested genes in long intro
 `--peak-augment` (boost intergenic scores near start/stop evidence peaks),
 `--promote-transcript-orfs` (at loci with only transcript evidence and no consensus CDS,
 find the longest ORF in the transcripts and emit it, tagged `support=transcript_orf`),
-plus `--repeats <gff3>` (mask repeats from scoring).
+`--alt-splice` (also emit each consensus locus's alternative transcript isoforms as extra
+mRNAs, with CDS derived from the consensus — inherited if matching, re-projected from the
+consensus start if divergent — and write a region-tagged alt-splice events TSV to
+`--events`), plus `--repeats <gff3>` (mask repeats from scoring).
 
 Global options: `--format gff3|gtf`, `--fuzzlength <bp>` (default 20),
 `--threads <n>`, and the quality filters `--min-avg-per-id` and `--min-intron`

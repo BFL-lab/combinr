@@ -143,9 +143,11 @@ fn run_run(a: RunArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Resul
 fn run_consensus(a: ConsensusArgs, fmt: OutputFormat) -> Result<()> {
     use combinr::consensus::to_out_genes;
     use combinr::model::Strand;
-    use combinr::pipeline::{ConsensusConfig, consensus_sources};
+    use combinr::pipeline::{ConsensusConfig, consensus_sources, consensus_with_isoforms};
 
     let strict = a.strict;
+    let alt_splice = a.alt_splice;
+    let events_path = a.events.clone();
     let cfg = ConsensusConfig {
         weights: a.weights,
         gene_predictions: a.gene_predictions,
@@ -165,8 +167,25 @@ fn run_consensus(a: ConsensusArgs, fmt: OutputFormat) -> Result<()> {
         extend_terminal_stop: a.extend_terminal_stop,
         peak_augment: a.peak_augment,
         promote_transcript_orfs: a.promote_transcript_orfs,
+        alt_splice,
         min_coding_length: 150,
     };
+
+    // --alt-splice: emit consensus + transcript-isoform mRNAs and a region-tagged events TSV.
+    if alt_splice {
+        let (out_genes, events) = consensus_with_isoforms(&cfg)
+            .with_context(|| "building consensus alt-splice models")?;
+        write_models(&out_genes, fmt)?;
+        write_events_file(&events, &events_path)?;
+        let mrnas: usize = out_genes.iter().map(|g| g.transcripts.len()).sum();
+        eprintln!(
+            "combinr consensus (--alt-splice): {} gene(s), {mrnas} mRNA(s), {} event(s) -> {}",
+            out_genes.len(),
+            events.len(),
+            events_path.display()
+        );
+        return Ok(());
+    }
 
     let genes = consensus_sources(&cfg).with_context(|| "building consensus gene models")?;
     let plus = genes.iter().filter(|g| g.orient == Strand::Plus).count();
