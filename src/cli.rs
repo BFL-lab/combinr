@@ -59,6 +59,9 @@ pub enum Command {
     /// Add CDS/UTR by reconciling an external gene-prediction GFF3.
     Orf(OrfArgs),
 
+    /// Build consensus gene models by integrating weighted evidence (EVM-style).
+    Consensus(ConsensusArgs),
+
     /// Full pipeline: assemble -> altsplice -> (optional) orf.
     Run(RunArgs),
 
@@ -105,6 +108,63 @@ pub struct OrfArgs {
     /// Path for the tab-separated alt-splice event report.
     #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
     pub events: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+pub struct ConsensusArgs {
+    /// Evidence weights file: 3 whitespace columns `CLASS TYPE WEIGHT`, where TYPE is
+    /// the GFF column-2 source of the corresponding evidence rows.
+    #[arg(long, required = true)]
+    pub weights: PathBuf,
+    /// Gene-prediction GFF3 (consensus reads CDS features); repeatable.
+    #[arg(long)]
+    pub gene_predictions: Vec<PathBuf>,
+    /// Protein-alignment GFF3 (match chains carrying `Target=`); repeatable.
+    #[arg(long)]
+    pub protein_alignments: Vec<PathBuf>,
+    /// Transcript-alignment GFF3 (match chains carrying `Target=`); repeatable.
+    #[arg(long)]
+    pub transcript_alignments: Vec<PathBuf>,
+    /// Genome FASTA (used by the trellis junction stop-check and CDS/UTR graft).
+    #[arg(long, required = true)]
+    pub genome: PathBuf,
+    /// Repeat-mask GFF3 (optional; masked bases are excluded from scoring).
+    #[arg(long)]
+    pub repeats: Option<PathBuf>,
+    /// NCBI genetic code for stop-codon detection. Supported: 1, 4, 6, 10, 12, 26.
+    #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
+    pub genetic_code: u32,
+    /// Flank (bp) added to each evidence locus to form a region.
+    #[arg(long, default_value_t = 10_000)]
+    pub flank: i64,
+    /// Drop low-support genes (EVM behaviour). Default keeps them and tags
+    /// `low_support=true` so a locus is never left blank.
+    #[arg(long)]
+    pub strict: bool,
+    /// DP look-back limit: max previous exons compared per trellis node.
+    #[arg(long, default_value_t = 500)]
+    pub max_prev_exons: usize,
+    /// Coding/noncoding score ratio below which a gene is flagged low-support.
+    #[arg(long, default_value_t = 0.75)]
+    pub min_score_ratio: f64,
+    /// Minimum intron length (bp).
+    #[arg(long, default_value_t = 20)]
+    pub min_intron_length: i64,
+    /// Re-search intergenic gaps of at least this size (bp) between called genes for
+    /// additional genes (EVM `--re_search_intergenic`). 0 = off.
+    #[arg(long, default_value_t = 0)]
+    pub research_intergenic: i64,
+    /// Re-search introns of at least this length (bp) for nested genes (EVM
+    /// `--search_long_introns`). 0 = off.
+    #[arg(long, default_value_t = 0)]
+    pub search_long_introns: i64,
+    /// Extend protein/transcript 3' termini to a genetic-code stop to form terminal exons
+    /// (lets evidence-only loci gain a 3' end). Off by default.
+    #[arg(long)]
+    pub extend_terminal_stop: bool,
+    /// Boost intergenic scores near start/stop evidence-density peaks. Off by default.
+    #[arg(long)]
+    pub peak_augment: bool,
 }
 
 #[derive(Parser, Debug)]

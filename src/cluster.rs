@@ -13,7 +13,7 @@
 //! opposite orientations, and the orientation wrapper resolves strand per
 //! assembly. Strandless (`Unknown`) alignments form their own bucket.
 
-use crate::model::{Alignment, Strand};
+use crate::model::{Alignment, Coordset, Strand};
 use std::collections::BTreeMap;
 
 /// A set of alignments to be assembled together (indices into the input slice).
@@ -97,6 +97,54 @@ fn strand_from_key(k: u8) -> Strand {
     }
 }
 
+/// A set of spans grouped into one region (indices into the input slice), keyed by
+/// contig only. Used by the consensus path, whose trellis spans both strands of a locus.
+#[derive(Debug, Clone)]
+pub struct ContigCluster {
+    pub contig: String,
+    pub member_indices: Vec<usize>,
+}
+
+/// Single-linkage clustering of `(contig, span)` items by inclusive genomic overlap,
+/// bucketed by **contig only** (strand ignored). Same linear sweep as
+/// [`cluster_alignments`], but without the strand split — the consensus DP integrates
+/// both strands of a locus in one pass.
+pub fn cluster_spans_by_contig(spans: &[(String, Coordset)]) -> Vec<ContigCluster> {
+    let mut buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, (contig, _)) in spans.iter().enumerate() {
+        buckets.entry(contig.as_str()).or_default().push(i);
+    }
+
+    let mut clusters = Vec::new();
+    for (contig, mut idxs) in buckets {
+        idxs.sort_by_key(|&i| (spans[i].1.lend, spans[i].1.rend));
+
+        let mut current: Vec<usize> = Vec::new();
+        let mut run_max_rend = i64::MIN;
+        for idx in idxs {
+            let span = spans[idx].1;
+            if current.is_empty() || span.lend <= run_max_rend {
+                current.push(idx);
+                run_max_rend = run_max_rend.max(span.rend);
+            } else {
+                clusters.push(ContigCluster {
+                    contig: contig.to_string(),
+                    member_indices: std::mem::take(&mut current),
+                });
+                current.push(idx);
+                run_max_rend = span.rend;
+            }
+        }
+        if !current.is_empty() {
+            clusters.push(ContigCluster {
+                contig: contig.to_string(),
+                member_indices: current,
+            });
+        }
+    }
+    clusters
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +219,22 @@ mod tests {
             al("b", "chr1", Strand::Plus, &[(201, 300)]), // adjacent, no shared base
         ];
         assert_eq!(cluster_alignments(&gap).len(), 2);
+    }
+
+    #[test]
+    fn span_clustering_by_contig_ignores_strand() {
+        let spans = vec![
+            ("chr1".to_string(), Coordset::new(100, 200)),
+            ("chr1".to_string(), Coordset::new(180, 300)), // overlaps prev
+            ("chr1".to_string(), Coordset::new(500, 600)), // separate
+            ("chr2".to_string(), Coordset::new(1, 50)),
+        ];
+        let cs = cluster_spans_by_contig(&spans);
+        // chr1: {0,1} merged + {2}; chr2: {3}
+        assert_eq!(cs.len(), 3);
+        assert_eq!(cs[0].contig, "chr1");
+        assert_eq!(cs[0].member_indices.len(), 2);
+        assert_eq!(cs[1].member_indices, vec![2]);
+        assert_eq!(cs[2].contig, "chr2");
     }
 }

@@ -6,7 +6,8 @@ use std::io::{BufWriter, Read, Write};
 mod cli;
 
 use cli::{
-    AltspliceArgs, AssembleArgs, AssembleTokensArgs, Cli, Command, OrfArgs, OutputFormat, RunArgs,
+    AltspliceArgs, AssembleArgs, AssembleTokensArgs, Cli, Command, ConsensusArgs, OrfArgs,
+    OutputFormat, RunArgs,
 };
 use combinr::altsplice::EventRecord;
 use combinr::assemble::Assembler;
@@ -39,6 +40,7 @@ fn main() -> Result<()> {
         Command::Assemble(a) => run_assemble(a, fuzz, &filters, fmt),
         Command::Altsplice(a) => run_altsplice(a, fuzz, &filters, fmt),
         Command::Orf(a) => run_orf(a, fuzz, &filters, fmt),
+        Command::Consensus(a) => run_consensus(a, fmt),
         Command::Run(a) => run_run(a, fuzz, &filters, fmt),
         Command::AssembleTokens(a) => run_assemble_tokens(a, fuzz),
     }
@@ -125,6 +127,58 @@ fn run_run(a: RunArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Resul
         ),
         _ => anyhow::bail!("--gene-pred and --genome must be provided together"),
     }
+}
+
+/// `consensus`: build EVM-style consensus gene models by integrating weighted evidence
+/// across both strands, then emit them as GFF3 (or GTF). Low-support genes are flagged,
+/// not dropped, unless `--strict` is given.
+fn run_consensus(a: ConsensusArgs, fmt: OutputFormat) -> Result<()> {
+    use combinr::consensus::to_out_genes;
+    use combinr::model::Strand;
+    use combinr::pipeline::{ConsensusConfig, consensus_sources};
+
+    let strict = a.strict;
+    let cfg = ConsensusConfig {
+        weights: a.weights,
+        gene_predictions: a.gene_predictions,
+        protein_alignments: a.protein_alignments,
+        transcript_alignments: a.transcript_alignments,
+        genome: a.genome,
+        repeats: a.repeats,
+        genetic_code: a.genetic_code,
+        flank: a.flank,
+        strict,
+        max_prev_exons: a.max_prev_exons,
+        min_score_ratio: a.min_score_ratio,
+        min_intron_length: a.min_intron_length,
+        research_size: 10_000,
+        research_intergenic: a.research_intergenic,
+        search_long_introns: a.search_long_introns,
+        extend_terminal_stop: a.extend_terminal_stop,
+        peak_augment: a.peak_augment,
+        min_coding_length: 150,
+    };
+
+    let genes = consensus_sources(&cfg).with_context(|| "building consensus gene models")?;
+    let plus = genes.iter().filter(|g| g.orient == Strand::Plus).count();
+    let low = genes.iter().filter(|g| g.support.low_support).count();
+
+    let out_genes = to_out_genes(&genes);
+    write_models(&out_genes, fmt)?;
+
+    eprintln!(
+        "combinr consensus: {} gene(s) ({} +, {} -); {} flagged low_support{}",
+        genes.len(),
+        plus,
+        genes.len() - plus,
+        low,
+        if strict {
+            " (dropped, --strict)"
+        } else {
+            " (kept)"
+        },
+    );
+    Ok(())
 }
 
 /// Write transcript models to stdout in the selected format.

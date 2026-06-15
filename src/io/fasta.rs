@@ -38,6 +38,14 @@ impl Fasta {
         Ok(Fasta { seqs })
     }
 
+    /// Build a single-contig FASTA in memory from an already-uppercased sequence.
+    /// Used by the consensus minus-strand pass to wrap a reverse-complemented region.
+    pub fn from_seq(name: impl Into<String>, seq: Vec<u8>) -> Fasta {
+        let mut seqs = HashMap::new();
+        seqs.insert(name.into(), seq);
+        Fasta { seqs }
+    }
+
     /// 1-based inclusive subsequence `[lend, rend]` on `contig`, or `None` if the
     /// contig is absent or the range is out of bounds.
     pub fn subseq(&self, contig: &str, lend: i64, rend: i64) -> Option<&[u8]> {

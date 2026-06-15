@@ -10,6 +10,7 @@
 pub mod altsplice;
 pub mod assemble;
 pub mod cluster;
+pub mod consensus;
 pub mod error;
 pub mod filter;
 pub mod io;
