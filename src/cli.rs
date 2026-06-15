@@ -108,7 +108,7 @@ pub struct ConsensusArgs {
     /// Repeat-mask GFF3 (optional; masked bases are excluded from scoring).
     #[arg(long)]
     pub repeats: Option<PathBuf>,
-    /// NCBI genetic code for stop-codon detection. Supported: 1, 4, 6, 10, 12, 26.
+    /// NCBI genetic code for stop-codon detection. Supported: NCBI tables 1-6, 9-16, 21-26.
     #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
     pub genetic_code: u32,
     /// Flank (bp) added to each evidence locus to form a region.
@@ -168,7 +168,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub genome: Option<PathBuf>,
     /// NCBI genetic code (translation table) for the ORF/UTR step's stop-codon
-    /// detection. Default 1 (standard). Supported: 1, 4, 6, 10, 12, 26.
+    /// detection. Default 1 (standard). Supported: NCBI tables 1-6, 9-16, 21-26.
     #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
     pub genetic_code: u32,
     /// Path for the tab-separated alt-splice event report.

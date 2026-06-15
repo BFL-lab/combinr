@@ -8,8 +8,10 @@
 //! partitioning and canonical-site bias removed (see `consensus-evm-port` and
 //! `avoid-canonical-splice-bias` notes, and the project plan).
 //!
-//! Milestone status: **M0** — scaffolding only (weights parsing, evidence ingestion,
-//! per-contig region clustering). The trellis engine lands in later milestones.
+//! Status: complete. Weights parsing, evidence ingestion, per-contig region
+//! clustering, the frame-aware gene-structure DP trellis, candidate scoring,
+//! transcript-ORF promotion, and alt-splice isoform emission are all implemented
+//! and exercised end-to-end by the `golden_consensus` integration test.
 
 pub mod altsplice;
 pub mod candidates;

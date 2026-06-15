@@ -48,9 +48,10 @@ coding structure).
   isoform's ORF stop). Multiple coding models per locus are supported.
 - **Genetic code.** Divergent-isoform stop detection uses the standard code
   (NCBI table 1) by default; pass `--genetic-code/-g <id>` to the `run`/`consensus`
-  step for a non-standard table. Supported: `1`, `4`, `6`, `10`, `12`, `26`
-  (only stop assignments differ between these; matching isoforms inherit the
-  predicted CDS and are unaffected by the code).
+  step for a non-standard table. Supported: NCBI tables `1-6`, `9-16`, `21-26`
+  (codes are grouped by stop-codon set, since only stop assignments affect ORF
+  bounds; matching isoforms inherit the predicted CDS and are unaffected by the
+  code). Tables with context-dependent stops (`27-31`, `33`) are not supported.
 - **Consensus never blanks a locus (`consensus`).** EVM eliminates a gene whose
   coding/noncoding score ratio falls below a threshold, which can leave a locus empty.
   combinr computes the same metric but **flags** low-support genes (`low_support=true`)

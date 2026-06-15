@@ -47,21 +47,37 @@ impl GeneticCode {
     /// Build from an NCBI translation-table id, or `Err` with a human-readable
     /// message for a table whose stop set we have not vetted.
     ///
-    /// Stop-codon sets (differences from the standard code noted):
-    /// - `1`  Standard ............ TAA TAG TGA
-    /// - `4`  Mold/Protozoan Mito . TAA TAG      (TGA = Trp)
-    /// - `6`  Ciliate Nuclear ..... TGA          (TAA TAG = Gln)
-    /// - `10` Euplotid Nuclear .... TAA TAG      (TGA = Cys)
-    /// - `12` Alt. Yeast Nuclear .. TAA TAG TGA  (CTG = Ser, a sense change)
-    /// - `26` Pachysolen Nuclear .. TAA TAG TGA  (CTG = Ala, a sense change)
+    /// Only stop assignments matter here — sense reassignments (e.g. CTG→Ser/Ala
+    /// in tables 12/26) don't move CDS/UTR bounds, which depend solely on the first
+    /// in-frame stop — so tables are grouped by their stop-codon set, taken from the
+    /// NCBI translation tables (BioPython `unambiguous_dna_by_id[id].stop_codons`):
+    ///
+    /// - TAA TAG TGA (standard) ...... 1, 11, 12, 26
+    /// - TAA TAG ..................... 3, 4, 5, 9, 10, 13, 21, 24, 25
+    /// - TGA ......................... 6   (ciliate nuclear; TAA TAG = Gln)
+    /// - TAA TAG AGA AGG ............. 2   (vertebrate mito)
+    /// - TAG ......................... 14  (alt. flatworm mito; TAA = Tyr, TGA = Trp)
+    /// - TAA TGA ..................... 15, 16  (TAG = Gln/Leu)
+    /// - TCA TAA TGA ................. 22  (Scenedesmus obliquus mito; TAG = Leu)
+    /// - TTA TAA TAG TGA ............. 23  (Thraustochytrium mito)
+    ///
+    /// Tables whose stops are context-dependent/dual-function (27–31, 33) are
+    /// rejected: their stop set is not a fixed property we can vet here.
     pub fn from_ncbi_id(id: u32) -> std::result::Result<GeneticCode, String> {
         let stops: &'static [&'static [u8]] = match id {
-            1 | 12 | 26 => &[b"TAA", b"TAG", b"TGA"],
-            4 | 10 => &[b"TAA", b"TAG"],
+            1 | 11 | 12 | 26 => &[b"TAA", b"TAG", b"TGA"],
+            3 | 4 | 5 | 9 | 10 | 13 | 21 | 24 | 25 => &[b"TAA", b"TAG"],
             6 => &[b"TGA"],
+            2 => &[b"TAA", b"TAG", b"AGA", b"AGG"],
+            14 => &[b"TAG"],
+            15 | 16 => &[b"TAA", b"TGA"],
+            22 => &[b"TCA", b"TAA", b"TGA"],
+            23 => &[b"TTA", b"TAA", b"TAG", b"TGA"],
             _ => {
                 return Err(format!(
-                    "unsupported NCBI genetic code {id}; supported tables: 1, 4, 6, 10, 12, 26"
+                    "unsupported NCBI genetic code {id}; supported tables: \
+                     1-6, 9-16, 21-26 (tables with context-dependent stop codons, \
+                     such as 27-31 and 33, are not supported)"
                 ));
             }
         };
@@ -163,6 +179,20 @@ mod tests {
         let c4 = GeneticCode::from_ncbi_id(4).unwrap();
         assert!(c4.is_stop(b"TAA") && c4.is_stop(b"TAG") && !c4.is_stop(b"TGA"));
 
+        // Bacterial/plastid (11): stops match the standard code (only starts differ).
+        let c11 = GeneticCode::from_ncbi_id(11).unwrap();
+        assert!(c11.is_stop(b"TAA") && c11.is_stop(b"TAG") && c11.is_stop(b"TGA"));
+
+        // Vertebrate mito (2): AGA/AGG become stops alongside TAA/TAG.
+        let c2 = GeneticCode::from_ncbi_id(2).unwrap();
+        assert!(c2.is_stop(b"AGA") && c2.is_stop(b"AGG") && c2.is_stop(b"TAA"));
+
+        // Chlorophycean mito (16): TAG → Leu, so only TAA/TGA stop.
+        let c16 = GeneticCode::from_ncbi_id(16).unwrap();
+        assert!(c16.is_stop(b"TAA") && c16.is_stop(b"TGA") && !c16.is_stop(b"TAG"));
+
+        // Context-dependent ciliate tables (e.g. 30) remain unsupported.
+        assert!(GeneticCode::from_ncbi_id(30).is_err());
         assert!(GeneticCode::from_ncbi_id(99).is_err());
     }
 }
