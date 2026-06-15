@@ -30,6 +30,11 @@ long as it is GTF, GFF3, or BAM:
   isoform is projected from the *same* start codon and translated along its own
   exon structure to the first in-frame stop (a premature stop becomes that
   isoform's ORF stop). Multiple coding models per locus are supported.
+- **Genetic code.** Divergent-isoform stop detection uses the standard code
+  (NCBI table 1) by default; pass `--genetic-code/-g <id>` to the `orf`/`run`
+  step for a non-standard table. Supported: `1`, `4`, `6`, `10`, `12`, `26`
+  (only stop assignments differ between these; matching isoforms inherit the
+  predicted CDS and are unaffected by the code).
 
 ## Build
 
@@ -48,6 +53,7 @@ combinr assemble -i sampleA.gtf -i sampleB.gff3 -i reads.bam > assemblies.gff3
 combinr altsplice -i sampleA.gtf -i sampleB.gff3 --events events.tsv > isoforms.gff3
 
 # 3) Reconcile an external CDS prediction into CDS/UTR annotations
+#    (add --genetic-code/-g for a non-standard table, e.g. -g 6 for ciliates)
 combinr orf -i samples.gtf --gene-pred predictions.gff3 --genome genome.fa \
     --events events.tsv > annotated.gff3
 

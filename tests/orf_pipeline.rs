@@ -54,6 +54,7 @@ fn clean_inherits_and_retained_projects_premature_stop() {
         genome.path(),
         20,
         &combinr::filter::Filters::none(),
+        combinr::orf::GeneticCode::default(),
     )
     .unwrap();
 

@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::filter::{self, Filters};
 use crate::io::fasta::Fasta;
 use crate::io::load_sources;
-use crate::orf::{ReconcileResult, parse_cds_models, reconcile};
+use crate::orf::{GeneticCode, ReconcileResult, parse_cds_models, reconcile};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
@@ -52,17 +52,19 @@ pub fn analyze_sources(
 }
 
 /// Algorithm 2 + the optional ORF/UTR step: analyze, then graft an external
-/// gene-prediction CDS onto each isoform and tag events by region.
+/// gene-prediction CDS onto each isoform and tag events by region. `code`
+/// selects the genetic code for divergent-isoform stop-codon detection.
 pub fn reconcile_sources(
     paths: &[PathBuf],
     gene_pred: &Path,
     genome: &Path,
     fuzzlength: i64,
     filters: &Filters,
+    code: GeneticCode,
 ) -> Result<(Vec<Isoform>, Vec<Locus>, ReconcileResult)> {
     let asr = analyze_sources(paths, fuzzlength, filters)?;
     let models = parse_cds_models(gene_pred)?;
     let genome = Fasta::load(genome)?;
-    let recon = reconcile(&asr.isoforms, &asr.loci, asr.events, &models, &genome);
+    let recon = reconcile(&asr.isoforms, &asr.loci, asr.events, &models, &genome, &code);
     Ok((asr.isoforms, asr.loci, recon))
 }

@@ -17,6 +17,8 @@
 pub mod coords;
 pub mod translate;
 
+pub use translate::GeneticCode;
+
 use crate::altsplice::{EventRecord, Isoform, Locus, RegionClass};
 use crate::error::{CombinrError, Result};
 use crate::io::fasta::Fasta;
@@ -155,12 +157,14 @@ pub fn parse_cds_models(path: &Path) -> Result<Vec<CdsModel>> {
 }
 
 /// Reconcile predicted CDS models onto isoforms and tag events by region.
+/// Divergent-isoform ORF projection uses `code` for stop-codon detection.
 pub fn reconcile(
     isoforms: &[Isoform],
     loci: &[Locus],
     mut events: Vec<EventRecord>,
     models: &[CdsModel],
     genome: &Fasta,
+    code: &GeneticCode,
 ) -> ReconcileResult {
     let mut isoform_codings: Vec<Vec<CodingAnnotation>> = vec![Vec::new(); isoforms.len()];
 
@@ -195,7 +199,7 @@ pub fn reconcile(
 
         for &iso_idx in isos {
             for model in &locus_models {
-                if let Some(ann) = graft(&isoforms[iso_idx], model, genome) {
+                if let Some(ann) = graft(&isoforms[iso_idx], model, genome, code) {
                     isoform_codings[iso_idx].push(ann);
                 }
             }
@@ -224,7 +228,12 @@ pub fn reconcile(
 
 /// Graft one model onto one isoform, returning the coding annotation, or `None`
 /// if the isoform cannot host the model (start codon not in any exon).
-fn graft(iso: &Isoform, model: &CdsModel, genome: &Fasta) -> Option<CodingAnnotation> {
+fn graft(
+    iso: &Isoform,
+    model: &CdsModel,
+    genome: &Fasta,
+    code: &GeneticCode,
+) -> Option<CodingAnnotation> {
     let st = SplicedTranscript::new(&iso.exons, iso.strand);
     let t_start = st.genomic_to_tpos(model.start_genomic)?;
 
@@ -243,7 +252,7 @@ fn graft(iso: &Isoform, model: &CdsModel, genome: &Fasta) -> Option<CodingAnnota
         (t_start, t_stop.max(t_start) + 1, false, false)
     } else {
         let seq = st.sequence(genome, &iso.contig)?;
-        let proj = st.project_orf(&seq, t_start);
+        let proj = st.project_orf(&seq, t_start, code);
         (proj.cds_t_start, proj.cds_t_end, !proj.hit_stop, true)
     };
 
@@ -349,7 +358,7 @@ mod tests {
 
         // clean isoform: same 2-exon structure → inherits, not altered.
         let clean = iso_from("clean", &[(1, 6), (16, 30)]);
-        let ann_clean = graft(&clean, &model, &g).unwrap();
+        let ann_clean = graft(&clean, &model, &g, &GeneticCode::default()).unwrap();
         assert!(!ann_clean.coding_altered, "matching structure inherits CDS");
         assert_eq!(
             ann_clean.cds_segments,
@@ -360,7 +369,7 @@ mod tests {
         // retained-intron isoform: single exon 1..30 → diverges, projects from the
         // same start (pos 1) and hits the premature TAA at 7..9.
         let retained = iso_from("retained", &[(1, 30)]);
-        let ann_div = graft(&retained, &model, &g).unwrap();
+        let ann_div = graft(&retained, &model, &g, &GeneticCode::default()).unwrap();
         assert!(ann_div.coding_altered, "retained intron diverges");
         // CDS = 1..9 (ATG AAA TAA), premature stop.
         assert_eq!(ann_div.cds_segments, vec![Coordset::new(1, 9)]);

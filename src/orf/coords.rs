@@ -7,7 +7,7 @@
 
 use crate::io::fasta::Fasta;
 use crate::model::{Coordset, Strand};
-use crate::orf::translate::{is_stop, reverse_complement};
+use crate::orf::translate::{GeneticCode, reverse_complement};
 
 struct ExonPiece {
     genomic: Coordset, // lend <= rend
@@ -146,14 +146,14 @@ impl SplicedTranscript {
     }
 
     /// Project an ORF starting at transcript offset `cds_t_start` (the 5' base of
-    /// the start codon), translating `seq` until the first in-frame stop. With no
-    /// stop, the CDS runs to the last complete codon (3'-partial).
-    pub fn project_orf(&self, seq: &[u8], cds_t_start: usize) -> OrfProjection {
+    /// the start codon), translating `seq` until the first in-frame stop under
+    /// `code`. With no stop, the CDS runs to the last complete codon (3'-partial).
+    pub fn project_orf(&self, seq: &[u8], cds_t_start: usize, code: &GeneticCode) -> OrfProjection {
         let mut t = cds_t_start;
         let mut hit_stop = false;
         let mut cds_t_end = self.total_len;
         while t + 3 <= seq.len() {
-            if is_stop(&seq[t..t + 3]) {
+            if code.is_stop(&seq[t..t + 3]) {
                 cds_t_end = t + 3; // include the stop codon
                 hit_stop = true;
                 break;
@@ -220,7 +220,7 @@ mod tests {
         // single exon, sequence ATG AAA TAA ...
         let t = SplicedTranscript::new(&[cs(1, 12)], Strand::Plus);
         let seq = b"ATGAAATAACC";
-        let p = t.project_orf(seq, 0);
+        let p = t.project_orf(seq, 0, &GeneticCode::default());
         assert!(p.hit_stop);
         assert_eq!(p.cds_t_start, 0);
         assert_eq!(p.cds_t_end, 9); // includes TAA
@@ -230,9 +230,24 @@ mod tests {
     fn project_orf_runs_off_end_when_no_stop() {
         let t = SplicedTranscript::new(&[cs(1, 11)], Strand::Plus);
         let seq = b"ATGAAACCCGG"; // 11 nt, no stop
-        let p = t.project_orf(seq, 0);
+        let p = t.project_orf(seq, 0, &GeneticCode::default());
         assert!(!p.hit_stop);
         // last complete codon: 11/3 = 3 codons → 9
         assert_eq!(p.cds_t_end, 9);
+    }
+
+    #[test]
+    fn project_orf_reads_through_reassigned_stop() {
+        // Codons: ATG AAA TAA TGG TGA. Under the standard code the TAA at 6..9
+        // ends the ORF; under ciliate code 6 (TAA = Gln) it reads through to the
+        // TGA at 12..15.
+        let t = SplicedTranscript::new(&[cs(1, 15)], Strand::Plus);
+        let seq = b"ATGAAATAATGGTGA";
+        let std = t.project_orf(seq, 0, &GeneticCode::default());
+        assert!(std.hit_stop);
+        assert_eq!(std.cds_t_end, 9);
+        let cil = t.project_orf(seq, 0, &GeneticCode::from_ncbi_id(6).unwrap());
+        assert!(cil.hit_stop);
+        assert_eq!(cil.cds_t_end, 15);
     }
 }

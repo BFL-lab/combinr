@@ -31,9 +31,62 @@ fn complement(b: u8) -> u8 {
     }
 }
 
-/// `true` if `codon` (3 uppercase bytes) is a stop codon under the standard code.
-pub fn is_stop(codon: &[u8]) -> bool {
-    matches!(codon, b"TAA" | b"TAG" | b"TGA")
+/// A genetic code, reduced to what ORF reconciliation needs: which codons are
+/// stops. Only stop assignments differ between the tables we support; sense
+/// reassignments (e.g. CTG→Ser/Ala in tables 12/26) don't affect CDS/UTR bounds,
+/// which depend solely on where translation hits the first in-frame stop. Stop
+/// sets follow the NCBI translation tables (BioPython's
+/// `unambiguous_dna_by_id[id].stop_codons`).
+#[derive(Clone, Copy, Debug)]
+pub struct GeneticCode {
+    ncbi_id: u32,
+    stops: &'static [&'static [u8]],
+}
+
+impl GeneticCode {
+    /// Build from an NCBI translation-table id, or `Err` with a human-readable
+    /// message for a table whose stop set we have not vetted.
+    ///
+    /// Stop-codon sets (differences from the standard code noted):
+    /// - `1`  Standard ............ TAA TAG TGA
+    /// - `4`  Mold/Protozoan Mito . TAA TAG      (TGA = Trp)
+    /// - `6`  Ciliate Nuclear ..... TGA          (TAA TAG = Gln)
+    /// - `10` Euplotid Nuclear .... TAA TAG      (TGA = Cys)
+    /// - `12` Alt. Yeast Nuclear .. TAA TAG TGA  (CTG = Ser, a sense change)
+    /// - `26` Pachysolen Nuclear .. TAA TAG TGA  (CTG = Ala, a sense change)
+    pub fn from_ncbi_id(id: u32) -> std::result::Result<GeneticCode, String> {
+        let stops: &'static [&'static [u8]] = match id {
+            1 | 12 | 26 => &[b"TAA", b"TAG", b"TGA"],
+            4 | 10 => &[b"TAA", b"TAG"],
+            6 => &[b"TGA"],
+            _ => {
+                return Err(format!(
+                    "unsupported NCBI genetic code {id}; supported tables: 1, 4, 6, 10, 12, 26"
+                ));
+            }
+        };
+        Ok(GeneticCode { ncbi_id: id, stops })
+    }
+
+    /// The NCBI translation-table id.
+    pub fn ncbi_id(&self) -> u32 {
+        self.ncbi_id
+    }
+
+    /// `true` if `codon` (3 uppercase bytes) is a stop under this code.
+    pub fn is_stop(&self, codon: &[u8]) -> bool {
+        self.stops.iter().any(|&s| s == codon)
+    }
+}
+
+impl Default for GeneticCode {
+    /// The standard code (NCBI table 1).
+    fn default() -> GeneticCode {
+        GeneticCode {
+            ncbi_id: 1,
+            stops: &[b"TAA", b"TAG", b"TGA"],
+        }
+    }
 }
 
 /// Translate a single codon to a one-letter amino acid (`*` = stop, `X` =
@@ -83,11 +136,33 @@ mod tests {
 
     #[test]
     fn stops_and_translation() {
-        assert!(is_stop(b"TAA") && is_stop(b"TAG") && is_stop(b"TGA"));
-        assert!(!is_stop(b"ATG"));
+        let std = GeneticCode::default();
+        assert!(std.is_stop(b"TAA") && std.is_stop(b"TAG") && std.is_stop(b"TGA"));
+        assert!(!std.is_stop(b"ATG"));
         assert_eq!(translate_codon(b"ATG"), b'M');
         assert_eq!(translate_codon(b"TAA"), b'*');
         assert_eq!(translate_codon(b"GGG"), b'G');
         assert_eq!(translate_codon(b"NNN"), b'X');
+    }
+
+    #[test]
+    fn genetic_code_stop_sets() {
+        let c1 = GeneticCode::from_ncbi_id(1).unwrap();
+        assert!(c1.is_stop(b"TAA") && c1.is_stop(b"TAG") && c1.is_stop(b"TGA"));
+
+        // Ciliate nuclear (6): TAA/TAG are Gln; only TGA stops.
+        let c6 = GeneticCode::from_ncbi_id(6).unwrap();
+        assert!(c6.is_stop(b"TGA"));
+        assert!(!c6.is_stop(b"TAA") && !c6.is_stop(b"TAG"));
+
+        // Pachysolen (26): CTG→Ala is a sense change; stops match the standard code.
+        let c26 = GeneticCode::from_ncbi_id(26).unwrap();
+        assert!(c26.is_stop(b"TAA") && c26.is_stop(b"TAG") && c26.is_stop(b"TGA"));
+
+        // TGA-as-sense tables (4 Mold Mito, 10 Euplotid): only TAA/TAG stop.
+        let c4 = GeneticCode::from_ncbi_id(4).unwrap();
+        assert!(c4.is_stop(b"TAA") && c4.is_stop(b"TAG") && !c4.is_stop(b"TGA"));
+
+        assert!(GeneticCode::from_ncbi_id(99).is_err());
     }
 }

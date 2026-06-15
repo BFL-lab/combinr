@@ -13,6 +13,7 @@ use combinr::assemble::Assembler;
 use combinr::filter::Filters;
 use combinr::io::out_model::{OutGene, from_annotated_loci, from_assemblies, from_loci};
 use combinr::io::{writer_events, writer_gff3, writer_gtf};
+use combinr::orf::GeneticCode;
 use combinr::pipeline::{analyze_sources, assemble_sources, reconcile_sources};
 use combinr::token::parse_tokens;
 
@@ -75,8 +76,9 @@ fn run_altsplice(a: AltspliceArgs, fuzz: i64, filters: &Filters, fmt: OutputForm
 
 /// `orf`: alt-splice + reconcile an external CDS into CDS/UTR.
 fn run_orf(a: OrfArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Result<()> {
+    let code = GeneticCode::from_ncbi_id(a.genetic_code).map_err(anyhow::Error::msg)?;
     let (isoforms, loci, recon) =
-        reconcile_sources(&a.input, &a.gene_pred, &a.genome, fuzz, filters)
+        reconcile_sources(&a.input, &a.gene_pred, &a.genome, fuzz, filters, code)
             .with_context(|| "reconciling ORF/UTR")?;
     let genes = from_annotated_loci(&isoforms, &loci, &recon.isoform_codings);
     write_models(&genes, fmt)?;
@@ -105,6 +107,7 @@ fn run_run(a: RunArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Resul
                 input: a.input,
                 gene_pred: gp,
                 genome: g,
+                genetic_code: a.genetic_code,
                 events: a.events,
             },
             fuzz,

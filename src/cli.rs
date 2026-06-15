@@ -98,6 +98,10 @@ pub struct OrfArgs {
     /// Genome FASTA (required for the ORF/UTR step).
     #[arg(long, required = true)]
     pub genome: PathBuf,
+    /// NCBI genetic code (translation table) for the ORF/UTR step's stop-codon
+    /// detection. Default 1 (standard). Supported: 1, 4, 6, 10, 12, 26.
+    #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
+    pub genetic_code: u32,
     /// Path for the tab-separated alt-splice event report.
     #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
     pub events: PathBuf,
@@ -114,6 +118,10 @@ pub struct RunArgs {
     /// Genome FASTA (required together with --gene-pred).
     #[arg(long)]
     pub genome: Option<PathBuf>,
+    /// NCBI genetic code (translation table) for the ORF/UTR step's stop-codon
+    /// detection. Default 1 (standard). Supported: 1, 4, 6, 10, 12, 26.
+    #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
+    pub genetic_code: u32,
     /// Path for the tab-separated alt-splice event report.
     #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
     pub events: PathBuf,
