@@ -8,10 +8,12 @@ A self-contained Rust binary that reimplements evidence-combining genome-annotat
 algorithms from PASA and EVidenceModeler — no Perl, no database. Two families, named by
 the consolidation they perform:
 
-- **`assemble` / `altsplice` / `run`** — PASA: merge compatible transcript alignments into
-  non-redundant isoforms (keeps alternatives), classify alt-splice events; `run
-  --gene-pred --genome` also grafts an external CDS onto isoforms for CDS/UTR (this was the
-  former standalone `orf` subcommand, since removed — the `src/orf/` library stays).
+- **`assemble`** — PASA: merge compatible transcript alignments into non-redundant isoforms
+  (keeps alternatives). `--alt-splice` also groups into loci and classifies alt-splice
+  events; `--gene-pred --genome` grafts an external CDS onto isoforms for CDS/UTR. (The
+  former standalone `altsplice` / `run` / `orf` subcommands are all folded into `assemble`
+  now — the `src/altsplice/` and `src/orf/` libraries stay; `pipeline::analyze_sources` /
+  `reconcile_sources` are the entry points.)
 - **`consensus`** — EVidenceModeler: integrate *weighted* heterogeneous evidence
   (ab-initio predictions, protein/transcript alignments) into one best-scoring coding
   gene model per locus, via a frame-aware gene-structure DP trellis. With

@@ -5,10 +5,7 @@ use std::io::{BufWriter, Read, Write};
 
 mod cli;
 
-use cli::{
-    AltspliceArgs, AssembleArgs, AssembleTokensArgs, Cli, Command, ConsensusArgs, OutputFormat,
-    RunArgs,
-};
+use cli::{AssembleArgs, AssembleTokensArgs, Cli, Command, ConsensusArgs, OutputFormat};
 use combinr::altsplice::EventRecord;
 use combinr::assemble::Assembler;
 use combinr::filter::Filters;
@@ -17,164 +14,141 @@ use combinr::io::{writer_events, writer_gff3, writer_gtf};
 use combinr::orf::GeneticCode;
 use combinr::pipeline::{analyze_sources, assemble_sources, reconcile_sources};
 use combinr::token::parse_tokens;
-use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
-    let args = Cli::parse();
+    match Cli::parse().command {
+        Command::Assemble(a) => run_assemble(a),
+        Command::Consensus(a) => run_consensus(a),
+        Command::AssembleTokens(a) => run_assemble_tokens(a),
+    }
+}
 
-    if let Some(t) = args.threads {
+/// Configure the global rayon pool when an explicit thread count is requested.
+fn init_threads(threads: Option<usize>) {
+    if let Some(t) = threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(t)
             .build_global()
             .ok();
     }
+}
+
+/// `assemble`: the PASA driver. Bare emits a non-redundant assembly set; `--alt-splice`
+/// also groups into loci and classifies alternative-splicing events; `--gene-pred`
+/// with `--genome` reconciles an external CDS onto the isoforms for CDS + 5'/3' UTRs
+/// (the former `orf`/`run` step).
+fn run_assemble(a: AssembleArgs) -> Result<()> {
+    init_threads(a.common.threads);
+    let fmt = a.common.format;
+    let fuzz = a.tuning.fuzzlength;
     let filters = Filters {
-        min_avg_per_id: args.min_avg_per_id,
-        min_intron: args.min_intron,
+        min_avg_per_id: a.tuning.min_avg_per_id,
+        min_intron: a.tuning.min_intron,
         // --max-intron defaults to 100000; 0 or negative disables the cap.
-        max_intron: args.max_intron.filter(|&n| n > 0),
+        max_intron: a.tuning.max_intron.filter(|&n| n > 0),
     };
-    let fuzz = args.fuzzlength;
-    let fmt = args.format;
 
-    match args.command {
-        Command::Assemble(a) => run_assemble(a, fuzz, &filters, fmt),
-        Command::Altsplice(a) => run_altsplice(a, fuzz, &filters, fmt),
-        Command::Consensus(a) => run_consensus(a, fmt),
-        Command::Run(a) => run_run(a, fuzz, &filters, fmt),
-        Command::AssembleTokens(a) => run_assemble_tokens(a, fuzz),
-    }
-}
-
-/// `assemble`: load GTF/GFF3 sources, cluster, assemble, write models.
-fn run_assemble(a: AssembleArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Result<()> {
-    let assemblies =
-        assemble_sources(&a.input, fuzz, filters).with_context(|| "assembling input sources")?;
-    let genes = from_assemblies(&assemblies);
-    write_models(&genes, fmt)?;
-    eprintln!(
-        "combinr: {} non-redundant assemblies from {} source file(s)",
-        assemblies.len(),
-        a.input.len()
-    );
-    Ok(())
-}
-
-/// `altsplice`: assemble + group into loci + classify events.
-fn run_altsplice(a: AltspliceArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Result<()> {
-    let r = analyze_sources(&a.input, fuzz, filters).with_context(|| "analyzing alt-splicing")?;
-    let genes = from_loci(&r.isoforms, &r.loci);
-    write_models(&genes, fmt)?;
-    write_events_file(&r.events, &a.events)?;
-    eprintln!(
-        "combinr: {} isoform(s) in {} loci, {} alt-splice event(s) -> {}",
-        r.isoforms.len(),
-        r.loci.len(),
-        r.events.len(),
-        a.events.display()
-    );
-    Ok(())
-}
-
-/// Reconcile an external CDS prediction onto assembled isoforms (the former `orf`
-/// subcommand; now reachable only via `run --gene-pred --genome`).
-#[allow(clippy::too_many_arguments)]
-fn reconcile_orf(
-    input: &[PathBuf],
-    gene_pred: &Path,
-    genome: &Path,
-    genetic_code: u32,
-    events: &Path,
-    fuzz: i64,
-    filters: &Filters,
-    fmt: OutputFormat,
-) -> Result<()> {
-    let code = GeneticCode::from_ncbi_id(genetic_code).map_err(anyhow::Error::msg)?;
-    let (isoforms, loci, recon) = reconcile_sources(input, gene_pred, genome, fuzz, filters, code)
-        .with_context(|| "reconciling ORF/UTR")?;
-    let genes = from_annotated_loci(&isoforms, &loci, &recon.isoform_codings);
-    write_models(&genes, fmt)?;
-    write_events_file(&recon.events, events)?;
-    let coding = recon
-        .isoform_codings
-        .iter()
-        .filter(|c| !c.is_empty())
-        .count();
-    eprintln!(
-        "combinr: {} isoform(s) in {} loci, {coding} coding, {} event(s) -> {}",
-        isoforms.len(),
-        loci.len(),
-        recon.events.len(),
-        events.display()
-    );
-    Ok(())
-}
-
-/// `run`: full pipeline; reconciles ORF/UTR when both --gene-pred and --genome
-/// are given, otherwise stops after alt-splice.
-fn run_run(a: RunArgs, fuzz: i64, filters: &Filters, fmt: OutputFormat) -> Result<()> {
-    match (a.gene_pred, a.genome) {
-        (Some(gp), Some(g)) => reconcile_orf(
-            &a.input,
-            &gp,
-            &g,
-            a.genetic_code,
-            &a.events,
-            fuzz,
-            filters,
-            fmt,
-        ),
-        (None, None) => run_altsplice(
-            AltspliceArgs {
-                input: a.input,
-                events: a.events,
-            },
-            fuzz,
-            filters,
-            fmt,
-        ),
-        _ => anyhow::bail!("--gene-pred and --genome must be provided together"),
+    match (a.inputs.gene_pred, a.inputs.genome) {
+        // CDS/UTR reconcile: graft an external prediction's CDS onto the isoforms.
+        // Supersedes --alt-splice; the reconcile path emits region-tagged events too.
+        (Some(gene_pred), Some(genome)) => {
+            let code =
+                GeneticCode::from_ncbi_id(a.pipeline.genetic_code).map_err(anyhow::Error::msg)?;
+            let (isoforms, loci, recon) =
+                reconcile_sources(&a.inputs.input, &gene_pred, &genome, fuzz, &filters, code)
+                    .with_context(|| "reconciling ORF/UTR")?;
+            let genes = from_annotated_loci(&isoforms, &loci, &recon.isoform_codings);
+            write_models(&genes, fmt)?;
+            write_events_file(&recon.events, &a.pipeline.events)?;
+            let coding = recon
+                .isoform_codings
+                .iter()
+                .filter(|c| !c.is_empty())
+                .count();
+            eprintln!(
+                "combinr: {} isoform(s) in {} loci, {coding} coding, {} event(s) -> {}",
+                isoforms.len(),
+                loci.len(),
+                recon.events.len(),
+                a.pipeline.events.display()
+            );
+            Ok(())
+        }
+        // Alt-splice classification only.
+        (None, None) if a.pipeline.alt_splice => {
+            let r = analyze_sources(&a.inputs.input, fuzz, &filters)
+                .with_context(|| "analyzing alt-splicing")?;
+            let genes = from_loci(&r.isoforms, &r.loci);
+            write_models(&genes, fmt)?;
+            write_events_file(&r.events, &a.pipeline.events)?;
+            eprintln!(
+                "combinr: {} isoform(s) in {} loci, {} alt-splice event(s) -> {}",
+                r.isoforms.len(),
+                r.loci.len(),
+                r.events.len(),
+                a.pipeline.events.display()
+            );
+            Ok(())
+        }
+        // Bare assembly: non-redundant set, no events.
+        (None, None) => {
+            let assemblies = assemble_sources(&a.inputs.input, fuzz, &filters)
+                .with_context(|| "assembling input sources")?;
+            let genes = from_assemblies(&assemblies);
+            write_models(&genes, fmt)?;
+            eprintln!(
+                "combinr: {} non-redundant assemblies from {} source file(s)",
+                assemblies.len(),
+                a.inputs.input.len()
+            );
+            Ok(())
+        }
+        // --gene-pred and --genome are paired by clap `requires`, so a lone one
+        // never reaches here.
+        _ => unreachable!("--gene-pred and --genome are paired by clap `requires`"),
     }
 }
 
 /// `consensus`: build EVM-style consensus gene models by integrating weighted evidence
 /// across both strands, then emit them as GFF3 (or GTF). Low-support genes are flagged,
 /// not dropped, unless `--strict` is given.
-fn run_consensus(a: ConsensusArgs, fmt: OutputFormat) -> Result<()> {
+fn run_consensus(a: ConsensusArgs) -> Result<()> {
     use combinr::consensus::to_out_genes;
     use combinr::model::Strand;
     use combinr::pipeline::{ConsensusConfig, consensus_sources, consensus_with_isoforms};
 
-    let strict = a.strict;
-    let alt_splice = a.alt_splice;
-    let events_path = a.events.clone();
+    init_threads(a.common.threads);
+    let fmt = a.common.format;
+    let strict = a.behavior.strict;
+    let alt_splice = a.behavior.alt_splice;
+    let events_path = a.behavior.events.clone();
     let cfg = ConsensusConfig {
-        weights: a.weights,
-        gene_predictions: a.gene_predictions,
-        protein_alignments: a.protein_alignments,
-        transcript_alignments: a.transcript_alignments,
-        genome: a.genome,
-        repeats: a.repeats,
-        genetic_code: a.genetic_code,
-        flank: a.flank,
+        weights: a.inputs.weights,
+        gene_predictions: a.inputs.gene_predictions,
+        protein_alignments: a.inputs.protein_alignments,
+        transcript_alignments: a.inputs.transcript_alignments,
+        genome: a.inputs.genome,
+        repeats: a.inputs.repeats,
+        genetic_code: a.tuning.genetic_code,
+        flank: a.behavior.flank,
         strict,
-        max_prev_exons: a.max_prev_exons,
-        min_score_ratio: a.min_score_ratio,
-        min_intron_length: a.min_intron_length,
+        max_prev_exons: a.tuning.max_prev_exons,
+        min_score_ratio: a.tuning.min_score_ratio,
+        min_intron_length: a.tuning.min_intron_length,
         research_size: 10_000,
-        research_intergenic: a.research_intergenic,
-        search_long_introns: a.search_long_introns,
-        extend_terminal_stop: a.extend_terminal_stop,
-        peak_augment: a.peak_augment,
-        promote_transcript_orfs: a.promote_transcript_orfs,
+        research_intergenic: a.behavior.research_intergenic,
+        search_long_introns: a.behavior.search_long_introns,
+        extend_terminal_stop: a.tuning.extend_terminal_stop,
+        peak_augment: a.tuning.peak_augment,
+        promote_transcript_orfs: a.behavior.promote_transcript_orfs,
         alt_splice,
         min_coding_length: 150,
     };
 
     // --alt-splice: emit consensus + transcript-isoform mRNAs and a region-tagged events TSV.
     if alt_splice {
-        let (out_genes, events) = consensus_with_isoforms(&cfg)
-            .with_context(|| "building consensus alt-splice models")?;
+        let (out_genes, events) =
+            consensus_with_isoforms(&cfg).with_context(|| "building consensus alt-splice models")?;
         write_models(&out_genes, fmt)?;
         write_events_file(&events, &events_path)?;
         let mrnas: usize = out_genes.iter().map(|g| g.transcripts.len()).sum();
@@ -233,7 +207,7 @@ fn write_events_file(events: &[EventRecord], path: &std::path::Path) -> Result<(
 
 /// Hidden golden-diff harness: read the C++ `pasa` token format, assemble, and
 /// print the `pasa`-compatible assembly lines.
-fn run_assemble_tokens(a: AssembleTokensArgs, fuzz: i64) -> Result<()> {
+fn run_assemble_tokens(a: AssembleTokensArgs) -> Result<()> {
     let (text, source) = match a.input {
         Some(path) => {
             let s = std::fs::read_to_string(&path)
@@ -251,7 +225,7 @@ fn run_assemble_tokens(a: AssembleTokensArgs, fuzz: i64) -> Result<()> {
 
     let alignments = parse_tokens(&text, &source)?;
     let mut assembler = Assembler::new(alignments);
-    assembler.set_fuzzlength(fuzz);
+    assembler.set_fuzzlength(a.fuzzlength);
     assembler.assemble()?;
     print!("{}", assembler.format_pasa_assemblies());
     Ok(())
