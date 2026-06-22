@@ -24,11 +24,12 @@ use std::path::{Path, PathBuf};
 pub fn assemble_sources(
     paths: &[PathBuf],
     fuzzlength: i64,
+    min_overlap_frac: f64,
     filters: &Filters,
 ) -> Result<Vec<ClusterAssembly>> {
     let alignments = load_sources(paths)?;
     let (alignments, _dropped) = filter::apply(alignments, filters);
-    let clusters = cluster_alignments(&alignments);
+    let clusters = cluster_alignments(&alignments, min_overlap_frac);
 
     // Clusters are independent → assemble in parallel.
     let per_cluster: Result<Vec<Vec<ClusterAssembly>>> = clusters
@@ -51,10 +52,11 @@ pub fn assemble_sources(
 pub fn analyze_sources(
     paths: &[PathBuf],
     fuzzlength: i64,
+    min_overlap_frac: f64,
     filters: &Filters,
 ) -> Result<AltSpliceResult> {
-    let assemblies = assemble_sources(paths, fuzzlength, filters)?;
-    Ok(analyze(&assemblies, fuzzlength))
+    let assemblies = assemble_sources(paths, fuzzlength, min_overlap_frac, filters)?;
+    Ok(analyze(&assemblies, fuzzlength, min_overlap_frac))
 }
 
 /// Algorithm 2 + the optional ORF/UTR step: analyze, then graft an external
@@ -65,10 +67,11 @@ pub fn reconcile_sources(
     gene_pred: &Path,
     genome: &Path,
     fuzzlength: i64,
+    min_overlap_frac: f64,
     filters: &Filters,
     code: GeneticCode,
 ) -> Result<(Vec<Isoform>, Vec<Locus>, ReconcileResult)> {
-    let asr = analyze_sources(paths, fuzzlength, filters)?;
+    let asr = analyze_sources(paths, fuzzlength, min_overlap_frac, filters)?;
     let models = parse_cds_models(gene_pred)?;
     let genome = Fasta::load(genome)?;
     let recon = reconcile(
@@ -104,6 +107,10 @@ pub struct ConsensusConfig {
     pub promote_transcript_orfs: bool,
     pub alt_splice: bool,
     pub min_coding_length: i64,
+    /// PASA `--stringent_alignment_overlap` for the `--alt-splice` isoform grouping:
+    /// isoforms share a gene only when their spans overlap `>=` this percent of the
+    /// shorter span. 0.0 = any overlap (off). Does not affect the EVM region partitioner.
+    pub stringent_overlap: f64,
 }
 
 /// Build consensus gene models: parse weights, ingest weighted evidence, cluster into
@@ -172,7 +179,12 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
     // Recover transcript-only loci via de-novo ORF (opt-in). Assemble the transcript
     // alignments (the PASA path) and promote loci with no overlapping consensus gene.
     if cfg.promote_transcript_orfs && !cfg.transcript_alignments.is_empty() {
-        let asr = analyze_sources(&cfg.transcript_alignments, 20, &Filters::none())?; // PASA fuzz default
+        let asr = analyze_sources(
+            &cfg.transcript_alignments,
+            20, // PASA fuzz default
+            cfg.stringent_overlap,
+            &Filters::none(),
+        )?;
         genes = crate::consensus::promote::promote_and_merge(
             genes,
             &asr,
@@ -195,7 +207,12 @@ pub fn consensus_with_isoforms(cfg: &ConsensusConfig) -> Result<(Vec<OutGene>, V
         line: 0,
         msg,
     })?;
-    let asr = analyze_sources(&cfg.transcript_alignments, 20, &Filters::none())?; // PASA fuzz default
+    let asr = analyze_sources(
+        &cfg.transcript_alignments,
+        20, // PASA fuzz default
+        cfg.stringent_overlap,
+        &Filters::none(),
+    )?;
     Ok(crate::consensus::altsplice::annotate(
         &genes, asr, &genome, &code,
     ))

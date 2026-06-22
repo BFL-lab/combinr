@@ -67,7 +67,7 @@ fn gff3_pipeline_matches_golden() {
         let mut tmp = tempfile::Builder::new().suffix(".gff3").tempfile().unwrap();
         tmp.write_all(gff.as_bytes()).unwrap();
 
-        let asms = assemble_sources(&[tmp.path().to_path_buf()], 20, &Filters::none()).unwrap();
+        let asms = assemble_sources(&[tmp.path().to_path_buf()], 20, 0.0, &Filters::none()).unwrap();
         let got: BTreeSet<common::CanonAssembly> =
             asms.iter().map(common::canon_from_cluster).collect();
         let expected = common::parse_assemblies(&read(&golden));

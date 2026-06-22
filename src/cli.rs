@@ -7,6 +7,10 @@ use std::path::PathBuf;
 /// Matches `CDNA_alignment_assembler` `fuzzlength = 20`.
 pub const DEFAULT_FUZZLENGTH: i64 = 20;
 
+/// Default stringent-overlap fraction (percent of the shorter span). 0 = off
+/// (any 1-bp overlap clusters), i.e. PASA `--stringent_alignment_overlap` disabled.
+pub const DEFAULT_STRINGENT_OVERLAP: f64 = 0.0;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "combinr",
@@ -112,6 +116,11 @@ pub struct AssembleTuning {
     /// Pairwise-compatibility fuzz distance (bp) at alignment termini.
     #[arg(long, default_value_t = DEFAULT_FUZZLENGTH)]
     pub fuzzlength: i64,
+    /// Require two transcripts' genomic-span overlap to be >= this percent of the
+    /// SHORTER span before they cluster into one gene (PASA
+    /// --stringent_alignment_overlap). 0 = off (any 1-bp overlap clusters, the default).
+    #[arg(long, default_value_t = DEFAULT_STRINGENT_OVERLAP)]
+    pub stringent_overlap: f64,
     /// Drop alignments whose average percent identity is below this (off by default).
     #[arg(long)]
     pub min_avg_per_id: Option<f64>,
@@ -180,6 +189,12 @@ pub struct ConsensusTuning {
     /// Coding/noncoding score ratio below which a gene is flagged low-support.
     #[arg(long, default_value_t = 0.75)]
     pub min_score_ratio: f64,
+    /// (--alt-splice only) Require two transcript isoforms' genomic-span overlap to be
+    /// >= this percent of the SHORTER span before they attach to one gene (PASA
+    /// --stringent_alignment_overlap). 0 = off (the default). The EVM consensus region
+    /// partitioner is unaffected.
+    #[arg(long, default_value_t = DEFAULT_STRINGENT_OVERLAP)]
+    pub stringent_overlap: f64,
     /// Extend protein/transcript 3' termini to a genetic-code stop to form terminal exons
     /// (lets evidence-only loci gain a 3' end). Off by default.
     #[arg(long)]

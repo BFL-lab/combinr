@@ -41,6 +41,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
     init_threads(a.common.threads);
     let fmt = a.common.format;
     let fuzz = a.tuning.fuzzlength;
+    let overlap = a.tuning.stringent_overlap;
     let filters = Filters {
         min_avg_per_id: a.tuning.min_avg_per_id,
         min_intron: a.tuning.min_intron,
@@ -54,9 +55,16 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
         (Some(gene_pred), Some(genome)) => {
             let code =
                 GeneticCode::from_ncbi_id(a.pipeline.genetic_code).map_err(anyhow::Error::msg)?;
-            let (isoforms, loci, recon) =
-                reconcile_sources(&a.inputs.input, &gene_pred, &genome, fuzz, &filters, code)
-                    .with_context(|| "reconciling ORF/UTR")?;
+            let (isoforms, loci, recon) = reconcile_sources(
+                &a.inputs.input,
+                &gene_pred,
+                &genome,
+                fuzz,
+                overlap,
+                &filters,
+                code,
+            )
+            .with_context(|| "reconciling ORF/UTR")?;
             let genes = from_annotated_loci(&isoforms, &loci, &recon.isoform_codings);
             write_models(&genes, fmt)?;
             write_events_file(&recon.events, &a.pipeline.events)?;
@@ -76,7 +84,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
         }
         // Alt-splice classification only.
         (None, None) if a.pipeline.alt_splice => {
-            let r = analyze_sources(&a.inputs.input, fuzz, &filters)
+            let r = analyze_sources(&a.inputs.input, fuzz, overlap, &filters)
                 .with_context(|| "analyzing alt-splicing")?;
             let genes = from_loci(&r.isoforms, &r.loci);
             write_models(&genes, fmt)?;
@@ -92,7 +100,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
         }
         // Bare assembly: non-redundant set, no events.
         (None, None) => {
-            let assemblies = assemble_sources(&a.inputs.input, fuzz, &filters)
+            let assemblies = assemble_sources(&a.inputs.input, fuzz, overlap, &filters)
                 .with_context(|| "assembling input sources")?;
             let genes = from_assemblies(&assemblies);
             write_models(&genes, fmt)?;
@@ -143,6 +151,7 @@ fn run_consensus(a: ConsensusArgs) -> Result<()> {
         promote_transcript_orfs: a.behavior.promote_transcript_orfs,
         alt_splice,
         min_coding_length: 150,
+        stringent_overlap: a.tuning.stringent_overlap,
     };
 
     // --alt-splice: emit consensus + transcript-isoform mRNAs and a region-tagged events TSV.

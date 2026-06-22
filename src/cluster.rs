@@ -39,7 +39,12 @@ fn cluster_strand(a: &Alignment) -> Strand {
 /// Cluster `alignments` by `(contig, strand)` single linkage on overlapping
 /// spans. Clusters are returned in a deterministic order (by contig, strand,
 /// then leftmost coordinate).
-pub fn cluster_alignments(alignments: &[Alignment]) -> Vec<Cluster> {
+///
+/// `min_overlap_frac` is PASA's `--stringent_alignment_overlap`: two spans only
+/// link when their overlap is at least that percent of the **shorter** span. At
+/// `0.0` (the default) any single shared base links them — identical to the
+/// historical any-overlap sweep.
+pub fn cluster_alignments(alignments: &[Alignment], min_overlap_frac: f64) -> Vec<Cluster> {
     // Bucket indices by (contig, strand), preserving deterministic key order.
     let mut buckets: BTreeMap<(String, u8), Vec<usize>> = BTreeMap::new();
     for (i, a) in alignments.iter().enumerate() {
@@ -48,34 +53,14 @@ pub fn cluster_alignments(alignments: &[Alignment]) -> Vec<Cluster> {
     }
 
     let mut clusters = Vec::new();
-    for ((contig, skey), mut idxs) in buckets {
+    for ((contig, skey), idxs) in buckets {
         let strand = strand_from_key(skey);
-        // Sort by (lend, rend) for the sweep; ties stable.
-        idxs.sort_by_key(|&i| (alignments[i].coords.lend, alignments[i].coords.rend));
-
-        let mut current: Vec<usize> = Vec::new();
-        let mut run_max_rend = i64::MIN;
-        for idx in idxs {
-            let span = alignments[idx].coords;
-            if current.is_empty() || span.lend <= run_max_rend {
-                // Inclusive overlap with the running merged interval.
-                current.push(idx);
-                run_max_rend = run_max_rend.max(span.rend);
-            } else {
-                clusters.push(Cluster {
-                    contig: contig.clone(),
-                    strand,
-                    member_indices: std::mem::take(&mut current),
-                });
-                current.push(idx);
-                run_max_rend = span.rend;
-            }
-        }
-        if !current.is_empty() {
+        let spans: Vec<Coordset> = idxs.iter().map(|&i| alignments[i].coords).collect();
+        for group in single_linkage_groups(&spans, min_overlap_frac) {
             clusters.push(Cluster {
                 contig: contig.clone(),
                 strand,
-                member_indices: current,
+                member_indices: group.into_iter().map(|l| idxs[l]).collect(),
             });
         }
     }
@@ -106,9 +91,10 @@ pub struct ContigCluster {
 }
 
 /// Single-linkage clustering of `(contig, span)` items by inclusive genomic overlap,
-/// bucketed by **contig only** (strand ignored). Same linear sweep as
-/// [`cluster_alignments`], but without the strand split — the consensus DP integrates
-/// both strands of a locus in one pass.
+/// bucketed by **contig only** (strand ignored) — the consensus DP integrates both
+/// strands of a locus in one pass. Always any-overlap (no stringency knob): the EVM
+/// region partitioner intentionally piles all overlapping evidence into one region and
+/// lets the trellis separate genes.
 pub fn cluster_spans_by_contig(spans: &[(String, Coordset)]) -> Vec<ContigCluster> {
     let mut buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, (contig, _)) in spans.iter().enumerate() {
@@ -116,33 +102,122 @@ pub fn cluster_spans_by_contig(spans: &[(String, Coordset)]) -> Vec<ContigCluste
     }
 
     let mut clusters = Vec::new();
-    for (contig, mut idxs) in buckets {
-        idxs.sort_by_key(|&i| (spans[i].1.lend, spans[i].1.rend));
-
-        let mut current: Vec<usize> = Vec::new();
-        let mut run_max_rend = i64::MIN;
-        for idx in idxs {
-            let span = spans[idx].1;
-            if current.is_empty() || span.lend <= run_max_rend {
-                current.push(idx);
-                run_max_rend = run_max_rend.max(span.rend);
-            } else {
-                clusters.push(ContigCluster {
-                    contig: contig.to_string(),
-                    member_indices: std::mem::take(&mut current),
-                });
-                current.push(idx);
-                run_max_rend = span.rend;
-            }
-        }
-        if !current.is_empty() {
+    for (contig, idxs) in buckets {
+        let bucket_spans: Vec<Coordset> = idxs.iter().map(|&i| spans[i].1).collect();
+        for group in single_linkage_groups(&bucket_spans, 0.0) {
             clusters.push(ContigCluster {
                 contig: contig.to_string(),
-                member_indices: current,
+                member_indices: group.into_iter().map(|l| idxs[l]).collect(),
             });
         }
     }
     clusters
+}
+
+// ---------------------------------------------------------------------------
+// Shared single-linkage core (overlap-fraction aware)
+// ---------------------------------------------------------------------------
+
+/// Edge test for single linkage: two spans link iff they overlap by at least
+/// `min_frac` percent of the **shorter** span's genomic length. `min_frac <= 0.0`
+/// links on any single shared base (the historical any-overlap behavior).
+fn span_overlap_edge(a: Coordset, b: Coordset, min_frac: f64) -> bool {
+    let overlap_bp = a.rend.min(b.rend) - a.lend.max(b.lend) + 1;
+    if overlap_bp <= 0 {
+        return false; // no shared base → never linked
+    }
+    if min_frac <= 0.0 {
+        return true; // any-overlap (default): exactly Coordset::overlaps_inclusive
+    }
+    let shorter = a.len().min(b.len());
+    (overlap_bp as f64) / (shorter as f64) * 100.0 >= min_frac
+}
+
+/// Disjoint-set forest (path compression + union by rank) for single linkage.
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        UnionFind {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
+    }
+    fn find(&mut self, x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        let mut cur = x;
+        while self.parent[cur] != root {
+            let next = self.parent[cur];
+            self.parent[cur] = root;
+            cur = next;
+        }
+        root
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra == rb {
+            return;
+        }
+        match self.rank[ra].cmp(&self.rank[rb]) {
+            std::cmp::Ordering::Less => self.parent[ra] = rb,
+            std::cmp::Ordering::Greater => self.parent[rb] = ra,
+            std::cmp::Ordering::Equal => {
+                self.parent[rb] = ra;
+                self.rank[ra] += 1;
+            }
+        }
+    }
+}
+
+/// Single-linkage grouping of `spans` by genomic-span overlap, requiring overlap
+/// `>= min_frac` percent of the shorter span (PASA `--stringent_alignment_overlap`).
+/// At `min_frac <= 0.0` this reduces EXACTLY to single linkage on any 1-bp overlap, so
+/// the connected components — and their ordering — match the historical lend-sorted
+/// sweep byte-for-byte.
+///
+/// Returns groups of indices into `spans`. Members within a group are ordered by
+/// `(lend, rend, index)`; groups are ordered by their leftmost member. A fraction
+/// threshold needs true single linkage (union-find), not a running-max sweep, because
+/// two spans both overlapping a third need not meet the fraction with each other. The
+/// `(lend, rend)`-sorted active window keeps it ~`O(n · pile-up depth)`.
+pub(crate) fn single_linkage_groups(spans: &[Coordset], min_frac: f64) -> Vec<Vec<usize>> {
+    let n = spans.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (spans[i].lend, spans[i].rend, i));
+
+    let mut uf = UnionFind::new(n);
+    let mut active: Vec<usize> = Vec::new(); // spans whose rend can still reach forward
+    for &i in &order {
+        let lend_i = spans[i].lend;
+        active.retain(|&j| spans[j].rend >= lend_i);
+        for &j in &active {
+            if span_overlap_edge(spans[i], spans[j], min_frac) {
+                uf.union(i, j);
+            }
+        }
+        active.push(i);
+    }
+
+    let mut by_root: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let r = uf.find(i);
+        by_root.entry(r).or_default().push(i);
+    }
+    let mut groups: Vec<Vec<usize>> = by_root.into_values().collect();
+    for g in &mut groups {
+        g.sort_by_key(|&i| (spans[i].lend, spans[i].rend, i));
+    }
+    groups.sort_by_key(|g| (spans[g[0]].lend, spans[g[0]].rend, g[0]));
+    groups
 }
 
 #[cfg(test)]
@@ -179,7 +254,7 @@ mod tests {
             al("b", "chr1", Strand::Plus, &[(180, 300)]),
             al("c", "chr1", Strand::Plus, &[(280, 400)]),
         ];
-        let clusters = cluster_alignments(&aligns);
+        let clusters = cluster_alignments(&aligns, 0.0);
         assert_eq!(clusters.len(), 1);
         assert_eq!(cluster_accs(&clusters[0], &aligns), vec!["a", "b", "c"]);
     }
@@ -190,7 +265,7 @@ mod tests {
             al("a", "chr1", Strand::Plus, &[(100, 200)]),
             al("b", "chr1", Strand::Plus, &[(500, 600)]),
         ];
-        let clusters = cluster_alignments(&aligns);
+        let clusters = cluster_alignments(&aligns, 0.0);
         assert_eq!(clusters.len(), 2);
     }
 
@@ -201,7 +276,7 @@ mod tests {
             al("m", "chr1", Strand::Minus, &[(100, 300)]), // antisense, same span
             al("o", "chr2", Strand::Plus, &[(100, 300)]),  // other contig
         ];
-        let clusters = cluster_alignments(&aligns);
+        let clusters = cluster_alignments(&aligns, 0.0);
         assert_eq!(clusters.len(), 3, "split by both strand and contig");
     }
 
@@ -212,13 +287,63 @@ mod tests {
             al("a", "chr1", Strand::Plus, &[(100, 200)]),
             al("b", "chr1", Strand::Plus, &[(200, 300)]), // shares base 200
         ];
-        assert_eq!(cluster_alignments(&overlap).len(), 1);
+        assert_eq!(cluster_alignments(&overlap, 0.0).len(), 1);
 
         let gap = vec![
             al("a", "chr1", Strand::Plus, &[(100, 200)]),
             al("b", "chr1", Strand::Plus, &[(201, 300)]), // adjacent, no shared base
         ];
-        assert_eq!(cluster_alignments(&gap).len(), 2);
+        assert_eq!(cluster_alignments(&gap, 0.0).len(), 2);
+    }
+
+    #[test]
+    fn stringent_overlap_splits_collinear_tip_overlap() {
+        // Two long single-exon spans that overlap only at their tips:
+        // a=(100,1100) len 1001, b=(1000,2000) len 1001, overlap = 1100-1000+1 = 101
+        // → 101/1001 ≈ 10% of the shorter. Below 30% they must NOT cluster; at the
+        // default 0.0 (any overlap) they do.
+        let aligns = vec![
+            al("a", "chr1", Strand::Plus, &[(100, 1100)]),
+            al("b", "chr1", Strand::Plus, &[(1000, 2000)]),
+        ];
+        assert_eq!(cluster_alignments(&aligns, 0.0).len(), 1);
+        assert_eq!(cluster_alignments(&aligns, 30.0).len(), 2);
+    }
+
+    #[test]
+    fn stringent_overlap_keeps_contained_short_transcript() {
+        // A short span fully inside a long one: overlap = 100% of the shorter span,
+        // so it stays clustered even at a high threshold (legitimate evidence).
+        let aligns = vec![
+            al("long", "chr1", Strand::Plus, &[(100, 2000)]),
+            al("short", "chr1", Strand::Plus, &[(500, 600)]),
+        ];
+        assert_eq!(cluster_alignments(&aligns, 90.0).len(), 1);
+    }
+
+    #[test]
+    fn stringent_overlap_threshold_is_inclusive() {
+        // shorter span len 100; overlap exactly 30 bp = 30% → clusters at min_frac=30
+        // (predicate uses >=). a=(1,100) len 100, b=(71,500): overlap = 100-71+1 = 30.
+        let aligns = vec![
+            al("a", "chr1", Strand::Plus, &[(1, 100)]),
+            al("b", "chr1", Strand::Plus, &[(71, 500)]),
+        ];
+        assert_eq!(cluster_alignments(&aligns, 30.0).len(), 1);
+        // a hair stricter and the 30% edge no longer qualifies.
+        assert_eq!(cluster_alignments(&aligns, 30.5).len(), 2);
+    }
+
+    #[test]
+    fn stringent_overlap_preserves_transitive_single_linkage() {
+        // a–b and b–c each overlap >=50% of their shorter span, but a–c not at all:
+        // single linkage (union-find) still joins all three into one cluster.
+        let aligns = vec![
+            al("a", "chr1", Strand::Plus, &[(100, 200)]),
+            al("b", "chr1", Strand::Plus, &[(150, 250)]), // shares 51 bp with a
+            al("c", "chr1", Strand::Plus, &[(200, 300)]), // shares 51 bp with b, 1 bp with a
+        ];
+        assert_eq!(cluster_alignments(&aligns, 50.0).len(), 1);
     }
 
     #[test]

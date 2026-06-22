@@ -42,6 +42,7 @@ fn default_config() -> ConsensusConfig {
         promote_transcript_orfs: false,
         alt_splice: false,
         min_coding_length: 150,
+        stringent_overlap: 0.0,
     }
 }
 

@@ -53,6 +53,7 @@ fn clean_inherits_and_retained_projects_premature_stop() {
         pred.path(),
         genome.path(),
         20,
+        0.0,
         &combinr::filter::Filters::none(),
         combinr::orf::GeneticCode::default(),
     )

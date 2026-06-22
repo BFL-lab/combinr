@@ -22,7 +22,8 @@ fn altsplice_matches_pasa_golden() {
     let fixtures = common::altsplice_fixtures();
     assert!(!fixtures.is_empty(), "no alt-splice fixtures vendored");
     for (input, golden) in fixtures {
-        let result = analyze_sources(std::slice::from_ref(&input), 20, &Filters::none()).unwrap();
+        let result =
+            analyze_sources(std::slice::from_ref(&input), 20, 0.0, &Filters::none()).unwrap();
         let got = common::canon_events(&result.events);
         let expected = common::load_lines(&golden);
         assert_eq!(

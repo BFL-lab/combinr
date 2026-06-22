@@ -162,9 +162,16 @@ pub struct AltSpliceResult {
 
 /// Analyze a set of assemblies: build isoforms, group into loci, and classify
 /// alternative-splicing events between isoforms of each locus.
-pub fn analyze(assemblies: &[ClusterAssembly], fuzzlength: i64) -> AltSpliceResult {
+///
+/// `min_overlap_frac` is PASA's `--stringent_alignment_overlap`, forwarded to the
+/// locus grouping (overlap `>=` that percent of the shorter span to share a gene).
+pub fn analyze(
+    assemblies: &[ClusterAssembly],
+    fuzzlength: i64,
+    min_overlap_frac: f64,
+) -> AltSpliceResult {
     let mut isoforms = locus::build_isoforms(assemblies);
-    let loci = locus::group_into_loci(&mut isoforms);
+    let loci = locus::group_into_loci(&mut isoforms, min_overlap_frac);
 
     let mut events = Vec::new();
     for locus in &loci {

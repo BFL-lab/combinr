@@ -49,7 +49,11 @@ pub fn build_isoforms(assemblies: &[ClusterAssembly]) -> Vec<Isoform> {
 
 /// Group isoforms into loci by `(contig, strand)` single-linkage span overlap,
 /// assigning stable `locus_N` / `locus_N.isoM` ids in place.
-pub fn group_into_loci(isoforms: &mut [Isoform]) -> Vec<Locus> {
+///
+/// `min_overlap_frac` is PASA's `--stringent_alignment_overlap`: two isoforms only
+/// share a locus when their genomic spans overlap by at least that percent of the
+/// **shorter** span. At `0.0` any overlap groups them (the historical behavior).
+pub fn group_into_loci(isoforms: &mut [Isoform], min_overlap_frac: f64) -> Vec<Locus> {
     // bucket indices by (contig, strand)
     let mut buckets: BTreeMap<(String, u8), Vec<usize>> = BTreeMap::new();
     for (i, iso) in isoforms.iter().enumerate() {
@@ -61,36 +65,20 @@ pub fn group_into_loci(isoforms: &mut [Isoform]) -> Vec<Locus> {
 
     // ordered list of runs (each becomes a locus), sorted deterministically.
     let mut runs: Vec<(String, Strand, i64, Vec<usize>)> = Vec::new();
-    for ((contig, skey), mut idxs) in buckets {
+    for ((contig, skey), idxs) in buckets {
         let strand = strand_from_key(skey);
-        idxs.sort_by_key(|&i| (isoforms[i].exons[0].lend, span_rend(&isoforms[i])));
-
-        let mut current: Vec<usize> = Vec::new();
-        let mut run_max_rend = i64::MIN;
-        let mut run_lend = i64::MAX;
-        for idx in idxs {
-            let lend = isoforms[idx].exons[0].lend;
-            let rend = span_rend(&isoforms[idx]);
-            if current.is_empty() || lend <= run_max_rend {
-                if current.is_empty() {
-                    run_lend = lend;
-                }
-                current.push(idx);
-                run_max_rend = run_max_rend.max(rend);
-            } else {
-                runs.push((
-                    contig.clone(),
-                    strand,
-                    run_lend,
-                    std::mem::take(&mut current),
-                ));
-                run_lend = lend;
-                current.push(idx);
-                run_max_rend = rend;
-            }
-        }
-        if !current.is_empty() {
-            runs.push((contig.clone(), strand, run_lend, current));
+        let spans: Vec<Coordset> = idxs
+            .iter()
+            .map(|&i| Coordset::new(isoforms[i].exons[0].lend, span_rend(&isoforms[i])))
+            .collect();
+        for group in crate::cluster::single_linkage_groups(&spans, min_overlap_frac) {
+            let members: Vec<usize> = group.into_iter().map(|l| idxs[l]).collect();
+            let run_lend = members
+                .iter()
+                .map(|&i| isoforms[i].exons[0].lend)
+                .min()
+                .expect("non-empty locus group");
+            runs.push((contig.clone(), strand, run_lend, members));
         }
     }
 
@@ -177,7 +165,7 @@ mod tests {
         let all: Vec<_> = asm1.into_iter().chain(asm2).collect();
 
         let mut isoforms = build_isoforms(&all);
-        let loci = group_into_loci(&mut isoforms);
+        let loci = group_into_loci(&mut isoforms, 0.0);
         assert_eq!(loci.len(), 1, "overlapping isoforms group together");
         assert_eq!(loci[0].isoform_indices.len(), 2);
         assert!(isoforms.iter().all(|i| i.id.starts_with("locus_1.iso")));
@@ -238,7 +226,50 @@ mod tests {
         .unwrap();
         let all: Vec<_> = a.into_iter().chain(b).collect();
         let mut isoforms = build_isoforms(&all);
-        let loci = group_into_loci(&mut isoforms);
+        let loci = group_into_loci(&mut isoforms, 0.0);
         assert_eq!(loci.len(), 2);
+    }
+
+    #[test]
+    fn stringent_overlap_splits_collinear_isoforms() {
+        // Two distinct isoforms whose genomic spans (100..1100 and 1000..2000, each
+        // len 1001) overlap only at the tips (101 bp ≈ 10% of the shorter). At the
+        // default 0.0 they share a locus; at 30% they split into two genes.
+        let a = assemble_cluster(
+            &[spliced("a", "chr1", Strand::Plus, &[(100, 200), (300, 1100)])],
+            20,
+        )
+        .unwrap();
+        let b = assemble_cluster(
+            &[spliced("b", "chr1", Strand::Plus, &[(1000, 1100), (1300, 2000)])],
+            20,
+        )
+        .unwrap();
+        let all: Vec<_> = a.into_iter().chain(b).collect();
+
+        let mut iso0 = build_isoforms(&all);
+        assert_eq!(group_into_loci(&mut iso0, 0.0).len(), 1);
+
+        let mut iso30 = build_isoforms(&all);
+        assert_eq!(group_into_loci(&mut iso30, 30.0).len(), 2);
+    }
+
+    #[test]
+    fn stringent_overlap_keeps_contained_isoform_in_locus() {
+        // A short isoform fully inside a long one (overlap = 100% of the shorter span)
+        // still shares the locus even at a high threshold.
+        let long = assemble_cluster(
+            &[spliced("long", "chr1", Strand::Plus, &[(100, 200), (2000, 2100)])],
+            20,
+        )
+        .unwrap();
+        let short = assemble_cluster(
+            &[spliced("short", "chr1", Strand::Plus, &[(500, 600), (700, 800)])],
+            20,
+        )
+        .unwrap();
+        let all: Vec<_> = long.into_iter().chain(short).collect();
+        let mut isoforms = build_isoforms(&all);
+        assert_eq!(group_into_loci(&mut isoforms, 90.0).len(), 1);
     }
 }

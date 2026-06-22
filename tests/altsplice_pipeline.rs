@@ -24,6 +24,7 @@ fn analyzes_locus_with_skip_and_alt_acceptor() {
     let result = analyze_sources(
         &[tmp.path().to_path_buf()],
         20,
+        0.0,
         &combinr::filter::Filters::none(),
     )
     .unwrap();
