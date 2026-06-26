@@ -71,46 +71,58 @@ coding structure).
 
 ## Install
 
-`combinr` is a single self-contained Rust binary with **no system dependencies**.
-No Perl, no database, and no htslib (BAM reading comes from the pure-Rust
-[`noodles`](https://github.com/zaeleus/noodles) crate). All you need to build it is
-a Rust toolchain; it runs on Linux and macOS.
+`combinr` is a single self-contained binary with **no system dependencies**: no
+Perl, no database, and no htslib (BAM reading comes from the pure-Rust
+[`noodles`](https://github.com/zaeleus/noodles) crate). It runs on Linux and
+macOS. Install a prebuilt binary (no toolchain required), or build from source.
 
-### Prerequisites
+### Prebuilt binary (recommended)
 
-**Rust 1.85 or newer** (the crate uses the 2024 edition). The easiest way to get a
-toolchain is [rustup](https://rustup.rs):
+The quickest option, and it needs no Rust toolchain. This downloads a prebuilt,
+statically-linked binary for your platform, verifies its checksum, installs it,
+and updates your `PATH`:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BFL-lab/combinr/releases/latest/download/combinr-installer.sh | sh
 ```
 
-If you already have rustup, make sure it's current: `rustup update stable`. Verify
-with `rustc --version` (should report `1.85.0` or later).
+`releases/latest/download/…` always resolves to the newest release; pin a
+specific version by using its tag instead:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BFL-lab/combinr/releases/download/v0.1.0/combinr-installer.sh | sh
+```
+
+Prefer to do it by hand (or on Windows)? Grab the tarball for your target — or the
+`.zip` on Windows — from the [Releases page](https://github.com/BFL-lab/combinr/releases),
+check it against the bundled `.sha256`, and put `combinr` on your `PATH`.
 
 ### Build from source
 
+Building needs a **Rust toolchain, 1.85 or newer** (the crate uses the 2024
+edition). The easiest way to get one is [rustup](https://rustup.rs):
+
 ```sh
-git clone <repo-url> combinr
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # then: rustc --version
+```
+
+Then clone and build:
+
+```sh
+git clone https://github.com/BFL-lab/combinr
 cd combinr
 cargo build --release
 # optimized binary lands at: target/release/combinr
 ./target/release/combinr --help
 ```
 
-The first build downloads and compiles dependencies and takes a few minutes;
-later builds are incremental. Drop `--release` for a faster-compiling, slower
-debug build under `target/debug/`.
-
-### Install onto your PATH
-
-`cargo install` compiles in release mode and copies the binary into `~/.cargo/bin`
-(which rustup already adds to your `PATH`):
+The first build compiles all dependencies and takes a few minutes; later builds
+are incremental. Drop `--release` for a faster-compiling debug build under
+`target/debug/`. To install it onto your `PATH` (into `~/.cargo/bin`):
 
 ```sh
-cargo install --path .              # from a local checkout
-# or straight from the repository:
-# cargo install --git <repo-url>
+cargo install --path .                                   # from a local checkout
+cargo install --git https://github.com/BFL-lab/combinr   # or straight from git
 combinr --version
 ```
 
