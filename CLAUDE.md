@@ -31,7 +31,7 @@ the consolidation they perform:
   are positional, strand is verbatim from input, and `consensus` derives candidate
   splice/start/stop sites from the *evidence* (union of observed intron boundaries + CDS
   bounds), never a genome GT-AG/ATG scan. In-frame stops use a configurable `GeneticCode`
-  (NCBI tables 1, 4, 6, 10, 12, 26).
+  (every assigned NCBI table: 1-6, 9-16, 21-33; grouped by stop-codon set).
 - Idiomatic Rust plumbing (clap, thiserror, fixedbitset, rayon, hand-rolled parsers);
   faithful algorithm cores.
 

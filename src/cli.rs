@@ -33,6 +33,9 @@ pub enum OutputFormat {
 /// regardless of where this struct is flattened.
 #[derive(Parser, Debug)]
 pub struct CommonOpts {
+    /// Write transcript models here instead of stdout (the default).
+    #[arg(short = 'o', long, help_heading = "Execution and logging")]
+    pub output: Option<PathBuf>,
     /// Output format for transcript models.
     #[arg(
         long,
@@ -41,9 +44,14 @@ pub struct CommonOpts {
         help_heading = "Execution and logging"
     )]
     pub format: OutputFormat,
-    /// Worker threads for per-cluster/-region work (default: all available cores).
-    #[arg(short = 't', long, help_heading = "Execution and logging")]
-    pub threads: Option<usize>,
+    /// Worker threads for per-cluster/-region work. Pass 0 to use all available cores.
+    #[arg(
+        short = 't',
+        long,
+        default_value_t = 4,
+        help_heading = "Execution and logging"
+    )]
+    pub threads: usize,
     /// Increase logging verbosity (repeatable).
     #[arg(
         short,
@@ -83,11 +91,22 @@ pub struct AssembleInputs {
     /// supported.
     #[arg(short, long, required = true)]
     pub input: Vec<PathBuf>,
-    /// Gene-prediction GFF3 with CDS: enables the CDS/UTR reconcile step
-    /// (requires --genome).
+}
+
+/// Optional inputs that switch `assemble` from plain non-redundant assembly into
+/// the CDS/UTR reconcile step. Both must be given together (or neither); they are
+/// not part of the default transcript-combining behavior.
+#[derive(Parser, Debug)]
+#[command(next_help_heading = "CDS/UTR reconcile (optional)")]
+pub struct AssembleReconcile {
+    /// Gene-prediction GFF3 with mapped CDS. Supplying this (together with
+    /// --genome) grafts the prediction's CDS onto each assembled isoform to add
+    /// CDS + 5'/3' UTRs, instead of emitting coordinate-only transcripts. Requires
+    /// --genome.
     #[arg(long, requires = "genome")]
     pub gene_pred: Option<PathBuf>,
-    /// Genome FASTA for the reconcile step (requires --gene-pred).
+    /// Genome FASTA, read for codon/UTR sequence during the reconcile step.
+    /// Required with, and only used by, --gene-pred.
     #[arg(long, requires = "gene_pred")]
     pub genome: Option<PathBuf>,
 }
@@ -105,7 +124,7 @@ pub struct AssemblePipeline {
     #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
     pub events: PathBuf,
     /// NCBI genetic code for the reconcile step's stop-codon detection (only used
-    /// with --gene-pred). Supported: NCBI tables 1-6, 9-16, 21-26.
+    /// with --gene-pred). Supported: NCBI tables 1-6, 9-16, 21-33.
     #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
     pub genetic_code: u32,
 }
@@ -138,6 +157,8 @@ pub struct AssembleTuning {
 pub struct AssembleArgs {
     #[command(flatten)]
     pub inputs: AssembleInputs,
+    #[command(flatten)]
+    pub reconcile: AssembleReconcile,
     #[command(flatten)]
     pub pipeline: AssemblePipeline,
     #[command(flatten)]
@@ -177,7 +198,7 @@ pub struct ConsensusInputs {
 #[derive(Parser, Debug)]
 #[command(next_help_heading = "Consensus tuning")]
 pub struct ConsensusTuning {
-    /// NCBI genetic code for stop-codon detection. Supported: NCBI tables 1-6, 9-16, 21-26.
+    /// NCBI genetic code for stop-codon detection. Supported: NCBI tables 1-6, 9-16, 21-33.
     #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
     pub genetic_code: u32,
     /// Minimum intron length (bp).
@@ -207,7 +228,11 @@ pub struct ConsensusTuning {
 #[derive(Parser, Debug)]
 #[command(next_help_heading = "Pipeline behavior")]
 pub struct ConsensusBehavior {
-    /// Flank (bp) added to each evidence locus to form a region.
+    /// Padding (bp) added to each side of an evidence locus to form its DP region.
+    /// This only widens the per-locus window — giving the trellis room to place
+    /// UTRs and start/stop ends beyond the evidence span. It does NOT affect
+    /// clustering: loci are grouped by raw evidence overlap *before* the flank is
+    /// applied, so a larger flank never merges separate loci into one gene.
     #[arg(long, default_value_t = 10_000)]
     pub flank: i64,
     /// Drop low-support genes (EVM behaviour). Default keeps them and tags

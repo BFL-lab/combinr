@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
+use std::path::Path;
 
 mod cli;
 
@@ -23,11 +24,12 @@ fn main() -> Result<()> {
     }
 }
 
-/// Configure the global rayon pool when an explicit thread count is requested.
-fn init_threads(threads: Option<usize>) {
-    if let Some(t) = threads {
+/// Configure the global rayon pool. A positive `threads` caps the pool at that
+/// many workers (default 4); `0` leaves rayon's own default (all available cores).
+fn init_threads(threads: usize) {
+    if threads > 0 {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(t)
+            .num_threads(threads)
             .build_global()
             .ok();
     }
@@ -40,6 +42,7 @@ fn init_threads(threads: Option<usize>) {
 fn run_assemble(a: AssembleArgs) -> Result<()> {
     init_threads(a.common.threads);
     let fmt = a.common.format;
+    let output = a.common.output.clone();
     let fuzz = a.tuning.fuzzlength;
     let overlap = a.tuning.stringent_overlap;
     let filters = Filters {
@@ -49,7 +52,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
         max_intron: a.tuning.max_intron.filter(|&n| n > 0),
     };
 
-    match (a.inputs.gene_pred, a.inputs.genome) {
+    match (a.reconcile.gene_pred, a.reconcile.genome) {
         // CDS/UTR reconcile: graft an external prediction's CDS onto the isoforms.
         // Supersedes --alt-splice; the reconcile path emits region-tagged events too.
         (Some(gene_pred), Some(genome)) => {
@@ -66,7 +69,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
             )
             .with_context(|| "reconciling ORF/UTR")?;
             let genes = from_annotated_loci(&isoforms, &loci, &recon.isoform_codings);
-            write_models(&genes, fmt)?;
+            write_models(&genes, fmt, output.as_deref())?;
             write_events_file(&recon.events, &a.pipeline.events)?;
             let coding = recon
                 .isoform_codings
@@ -87,7 +90,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
             let r = analyze_sources(&a.inputs.input, fuzz, overlap, &filters)
                 .with_context(|| "analyzing alt-splicing")?;
             let genes = from_loci(&r.isoforms, &r.loci);
-            write_models(&genes, fmt)?;
+            write_models(&genes, fmt, output.as_deref())?;
             write_events_file(&r.events, &a.pipeline.events)?;
             eprintln!(
                 "combinr: {} isoform(s) in {} loci, {} alt-splice event(s) -> {}",
@@ -103,7 +106,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
             let assemblies = assemble_sources(&a.inputs.input, fuzz, overlap, &filters)
                 .with_context(|| "assembling input sources")?;
             let genes = from_assemblies(&assemblies);
-            write_models(&genes, fmt)?;
+            write_models(&genes, fmt, output.as_deref())?;
             eprintln!(
                 "combinr: {} non-redundant assemblies from {} source file(s)",
                 assemblies.len(),
@@ -127,6 +130,7 @@ fn run_consensus(a: ConsensusArgs) -> Result<()> {
 
     init_threads(a.common.threads);
     let fmt = a.common.format;
+    let output = a.common.output.clone();
     let strict = a.behavior.strict;
     let alt_splice = a.behavior.alt_splice;
     let events_path = a.behavior.events.clone();
@@ -156,9 +160,9 @@ fn run_consensus(a: ConsensusArgs) -> Result<()> {
 
     // --alt-splice: emit consensus + transcript-isoform mRNAs and a region-tagged events TSV.
     if alt_splice {
-        let (out_genes, events) =
-            consensus_with_isoforms(&cfg).with_context(|| "building consensus alt-splice models")?;
-        write_models(&out_genes, fmt)?;
+        let (out_genes, events) = consensus_with_isoforms(&cfg)
+            .with_context(|| "building consensus alt-splice models")?;
+        write_models(&out_genes, fmt, output.as_deref())?;
         write_events_file(&events, &events_path)?;
         let mrnas: usize = out_genes.iter().map(|g| g.transcripts.len()).sum();
         eprintln!(
@@ -176,7 +180,7 @@ fn run_consensus(a: ConsensusArgs) -> Result<()> {
     let promoted = genes.iter().filter(|g| g.promoted).count();
 
     let out_genes = to_out_genes(&genes);
-    write_models(&out_genes, fmt)?;
+    write_models(&out_genes, fmt, output.as_deref())?;
 
     eprintln!(
         "combinr consensus: {} gene(s) ({} +, {} -); {} flagged low_support{}; {promoted} promoted transcript-ORF",
@@ -193,15 +197,33 @@ fn run_consensus(a: ConsensusArgs) -> Result<()> {
     Ok(())
 }
 
-/// Write transcript models to stdout in the selected format.
-fn write_models(genes: &[OutGene], fmt: OutputFormat) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
-    match fmt {
-        OutputFormat::Gff3 => writer_gff3::write(&mut out, genes)?,
-        OutputFormat::Gtf => writer_gtf::write(&mut out, genes)?,
+/// Write transcript models in the selected format to `output` (a file) or, when
+/// `None`, to stdout.
+fn write_models(genes: &[OutGene], fmt: OutputFormat, output: Option<&Path>) -> Result<()> {
+    match output {
+        Some(path) => {
+            let file =
+                File::create(path).with_context(|| format!("creating {}", path.display()))?;
+            let mut out = BufWriter::new(file);
+            write_models_to(&mut out, genes, fmt)?;
+            out.flush()?;
+        }
+        None => {
+            let stdout = std::io::stdout();
+            let mut out = BufWriter::new(stdout.lock());
+            write_models_to(&mut out, genes, fmt)?;
+            out.flush()?;
+        }
     }
-    out.flush()?;
+    Ok(())
+}
+
+/// Serialize `genes` to `out` in the selected format.
+fn write_models_to<W: Write>(out: &mut W, genes: &[OutGene], fmt: OutputFormat) -> Result<()> {
+    match fmt {
+        OutputFormat::Gff3 => writer_gff3::write(out, genes)?,
+        OutputFormat::Gtf => writer_gtf::write(out, genes)?,
+    }
     Ok(())
 }
 

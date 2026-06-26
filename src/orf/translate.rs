@@ -32,11 +32,11 @@ fn complement(b: u8) -> u8 {
 }
 
 /// A genetic code, reduced to what ORF reconciliation needs: which codons are
-/// stops. Only stop assignments differ between the tables we support; sense
-/// reassignments (e.g. CTG→Ser/Ala in tables 12/26) don't affect CDS/UTR bounds,
-/// which depend solely on where translation hits the first in-frame stop. Stop
-/// sets follow the NCBI translation tables (BioPython's
-/// `unambiguous_dna_by_id[id].stop_codons`).
+/// stops. Only stop assignments differ between the tables; sense reassignments
+/// (e.g. CTG→Ser/Ala in tables 12/26) don't affect CDS/UTR bounds, which depend
+/// solely on where translation hits the first in-frame stop. Stop sets follow the
+/// NCBI translation tables (as declared in BioPython's `CodonTable`,
+/// `register_ncbi_table(... stop_codons=[...])`).
 #[derive(Clone, Copy, Debug)]
 pub struct GeneticCode {
     ncbi_id: u32,
@@ -45,39 +45,43 @@ pub struct GeneticCode {
 
 impl GeneticCode {
     /// Build from an NCBI translation-table id, or `Err` with a human-readable
-    /// message for a table whose stop set we have not vetted.
+    /// message for an id NCBI has never assigned.
     ///
     /// Only stop assignments matter here — sense reassignments (e.g. CTG→Ser/Ala
     /// in tables 12/26) don't move CDS/UTR bounds, which depend solely on the first
     /// in-frame stop — so tables are grouped by their stop-codon set, taken from the
-    /// NCBI translation tables (BioPython `unambiguous_dna_by_id[id].stop_codons`):
+    /// NCBI translation tables (BioPython `register_ncbi_table(... stop_codons=[...])`):
     ///
-    /// - TAA TAG TGA (standard) ...... 1, 11, 12, 26
-    /// - TAA TAG ..................... 3, 4, 5, 9, 10, 13, 21, 24, 25
-    /// - TGA ......................... 6   (ciliate nuclear; TAA TAG = Gln)
+    /// - TAA TAG TGA (standard) ...... 1, 11, 12, 26, 28
+    /// - TAA TAG ..................... 3, 4, 5, 9, 10, 13, 21, 24, 25, 31
+    /// - TGA ......................... 6, 27, 29, 30   (ciliate/karyorelict nuclear; TAA TAG = Gln/Tyr/Glu)
     /// - TAA TAG AGA AGG ............. 2   (vertebrate mito)
-    /// - TAG ......................... 14  (alt. flatworm mito; TAA = Tyr, TGA = Trp)
-    /// - TAA TGA ..................... 15, 16  (TAG = Gln/Leu)
+    /// - TAG ......................... 14, 33   (alt. flatworm mito; Cephalodiscidae "UAA-Tyr" mito)
+    /// - TAA TGA ..................... 15, 16, 32   (TAG = Gln/Leu/Trp)
     /// - TCA TAA TGA ................. 22  (Scenedesmus obliquus mito; TAG = Leu)
     /// - TTA TAA TAG TGA ............. 23  (Thraustochytrium mito)
     ///
-    /// Tables whose stops are context-dependent/dual-function (27–31, 33) are
-    /// rejected: their stop set is not a fixed property we can vet here.
+    /// Tables 27/28/31 have *dual-function* codons (a codon serves as both sense and
+    /// stop depending on context); we use NCBI's declared stop set, i.e. such a codon
+    /// terminates translation. That is the conservative choice for CDS bounds —
+    /// translation halts at the first occurrence rather than reading through a real
+    /// stop — and still honours each table's reassignments (e.g. table 27 reads
+    /// TAA/TAG as Gln and stops only at TGA). Ids 7, 8, and 17–20 were deleted or
+    /// never assigned by NCBI and are rejected.
     pub fn from_ncbi_id(id: u32) -> std::result::Result<GeneticCode, String> {
         let stops: &'static [&'static [u8]] = match id {
-            1 | 11 | 12 | 26 => &[b"TAA", b"TAG", b"TGA"],
-            3 | 4 | 5 | 9 | 10 | 13 | 21 | 24 | 25 => &[b"TAA", b"TAG"],
-            6 => &[b"TGA"],
+            1 | 11 | 12 | 26 | 28 => &[b"TAA", b"TAG", b"TGA"],
+            3 | 4 | 5 | 9 | 10 | 13 | 21 | 24 | 25 | 31 => &[b"TAA", b"TAG"],
+            6 | 27 | 29 | 30 => &[b"TGA"],
             2 => &[b"TAA", b"TAG", b"AGA", b"AGG"],
-            14 => &[b"TAG"],
-            15 | 16 => &[b"TAA", b"TGA"],
+            14 | 33 => &[b"TAG"],
+            15 | 16 | 32 => &[b"TAA", b"TGA"],
             22 => &[b"TCA", b"TAA", b"TGA"],
             23 => &[b"TTA", b"TAA", b"TAG", b"TGA"],
             _ => {
                 return Err(format!(
-                    "unsupported NCBI genetic code {id}; supported tables: \
-                     1-6, 9-16, 21-26 (tables with context-dependent stop codons, \
-                     such as 27-31 and 33, are not supported)"
+                    "unknown NCBI genetic code {id}; valid tables are 1-6, 9-16, \
+                     and 21-33 (ids 7, 8, and 17-20 are unassigned)"
                 ));
             }
         };
@@ -190,9 +194,43 @@ mod tests {
         // Chlorophycean mito (16): TAG → Leu, so only TAA/TGA stop.
         let c16 = GeneticCode::from_ncbi_id(16).unwrap();
         assert!(c16.is_stop(b"TAA") && c16.is_stop(b"TGA") && !c16.is_stop(b"TAG"));
+    }
 
-        // Context-dependent ciliate tables (e.g. 30) remain unsupported.
-        assert!(GeneticCode::from_ncbi_id(30).is_err());
-        assert!(GeneticCode::from_ncbi_id(99).is_err());
+    #[test]
+    fn context_dependent_and_late_tables() {
+        // Karyorelict (27): TAA/TAG → Gln, only TGA terminates.
+        let c27 = GeneticCode::from_ncbi_id(27).unwrap();
+        assert!(c27.is_stop(b"TGA") && !c27.is_stop(b"TAA") && !c27.is_stop(b"TAG"));
+
+        // Condylostoma (28): TAA/TAG/TGA are all stop-capable (dual function) →
+        // conservative stop set is the standard one.
+        let c28 = GeneticCode::from_ncbi_id(28).unwrap();
+        assert!(c28.is_stop(b"TAA") && c28.is_stop(b"TAG") && c28.is_stop(b"TGA"));
+
+        // Mesodinium (29) & Peritrich (30): TAA/TAG reassigned (Tyr/Glu), only TGA stops.
+        for id in [29, 30] {
+            let c = GeneticCode::from_ncbi_id(id).unwrap();
+            assert!(c.is_stop(b"TGA") && !c.is_stop(b"TAA") && !c.is_stop(b"TAG"));
+        }
+
+        // Blastocrithidia (31): TGA → Trp; TAA/TAG terminate.
+        let c31 = GeneticCode::from_ncbi_id(31).unwrap();
+        assert!(c31.is_stop(b"TAA") && c31.is_stop(b"TAG") && !c31.is_stop(b"TGA"));
+
+        // Balanophoraceae plastid (32): TAG → Trp; TAA/TGA stop.
+        let c32 = GeneticCode::from_ncbi_id(32).unwrap();
+        assert!(c32.is_stop(b"TAA") && c32.is_stop(b"TGA") && !c32.is_stop(b"TAG"));
+
+        // Cephalodiscidae mito "UAA-Tyr" (33): TAA → Tyr, only TAG stops.
+        let c33 = GeneticCode::from_ncbi_id(33).unwrap();
+        assert!(c33.is_stop(b"TAG") && !c33.is_stop(b"TAA") && !c33.is_stop(b"TGA"));
+
+        // Deleted / never-assigned ids and out-of-range ids are rejected.
+        for id in [0, 7, 8, 17, 18, 19, 20, 34, 99] {
+            assert!(
+                GeneticCode::from_ncbi_id(id).is_err(),
+                "id {id} should be rejected"
+            );
+        }
     }
 }
