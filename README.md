@@ -1,13 +1,14 @@
 # combinr
 
-`combinr` reimplements the genuinely useful evidence-combining algorithms from
+`combinr` reimplements only the evidence-combining algorithms from
 [PASA](https://github.com/PASApipeline/PASApipeline) and
-[EVidenceModeler](https://github.com/EVidenceModeler/EVidenceModeler) as a single
-self-contained Rust binary — no database, no Trinity requirement, no Perl, and input
-from any source as long as it is GTF, GFF3, or BAM:
+[EVidenceModeler](https://github.com/EVidenceModeler/EVidenceModeler) as a
+single self-contained Rust binary. This reimplementation was made to be agnostic
+to input source, and also accepts a wide variety of input file types,
+specifically GTF, GFF3, or BAM.
 
 1. **Combine** multiple transcript-alignment sources into one **non-redundant**
-   assembly set (`assemble`). A faithful port of PASA's C++ `pasa` assembler and
+   assembly set (`assemble`). A faithful port of PASA's C++ assembler and
    its orientation wrapper.
 2. **Model alternative splicing** between the resulting isoforms
    (`assemble --alt-splice`: retained intron, alternate donor/acceptor,
@@ -15,8 +16,8 @@ from any source as long as it is GTF, GFF3, or BAM:
    exons); `assemble --gene-pred --genome` additionally reconciles an external
    gene-prediction CDS onto the isoforms to derive CDS + 5'/3' UTRs.
 3. **Build consensus gene models** (`consensus`) by integrating *weighted*
-   heterogeneous evidence — ab-initio gene predictions, protein alignments,
-   transcript alignments — into one best-scoring coding gene structure per locus,
+   heterogeneous evidence (ab-initio gene predictions, protein alignments,
+   transcript alignments) into one best-scoring coding gene structure per locus,
    via a frame-aware gene-structure dynamic program. A reimplementation of
    EVidenceModeler's core algorithm.
 
@@ -33,8 +34,8 @@ coding structure).
   junctions are defined purely by exon position, and strand is taken verbatim
   from the input. Whatever introns and strand your upstream tools produce are
   honored as-is. **This extends to `consensus`:** EVM normally scans the genome
-  for canonical GT‑AG splice sites and ATG/stop codons to gate candidate exons —
-  combinr does not. The candidate splice/start/stop sites are *evidence-derived*
+  for canonical GT‑AG splice sites and ATG/stop codons to gate candidate exons
+  whereas combinr does not. The candidate splice/start/stop sites are *evidence-derived*
   (the union of intron boundaries and CDS bounds seen across the inputs), and
   in-frame stops are detected with the configurable genetic code, never a hard-coded
   table.
@@ -53,12 +54,12 @@ coding structure).
   assigned and are rejected). Codes are grouped by stop-codon set, since only stop
   assignments affect ORF bounds; matching isoforms inherit the predicted CDS and
   are unaffected by the code. The context-dependent tables (27/28/31, whose codons
-  are dual sense/stop) use NCBI's declared stop set — translation halts at the
+  are dual sense/stop) use NCBI's declared stop set. Translation halts at the
   first such codon, the conservative choice for CDS bounds.
 - **Consensus never blanks a locus (`consensus`).** EVM eliminates a gene whose
   coding/noncoding score ratio falls below a threshold, which can leave a locus empty.
   combinr computes the same metric but **flags** low-support genes (`low_support=true`)
-  and keeps them by default — a false negative is treated as worse than a false
+  and keeps them by default. A false negative is treated as worse than a false
   positive. Pass `--strict` for EVM's drop-it behavior. (combinr also fixes EVM's bug
   where an *eliminated* gene's span still blocked the re-search for nested/adjacent
   genes.)
@@ -68,11 +69,58 @@ coding structure).
   best-strand pick. The genome FASTA is required here (for the across-junction stop
   check and CDS projection) but, per the note above, never gates which sites are allowed.
 
-## Build
+## Install
+
+`combinr` is a single self-contained Rust binary with **no system dependencies**.
+No Perl, no database, and no htslib (BAM reading comes from the pure-Rust
+[`noodles`](https://github.com/zaeleus/noodles) crate). All you need to build it is
+a Rust toolchain; it runs on Linux and macOS.
+
+### Prerequisites
+
+**Rust 1.85 or newer** (the crate uses the 2024 edition). The easiest way to get a
+toolchain is [rustup](https://rustup.rs):
 
 ```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+If you already have rustup, make sure it's current: `rustup update stable`. Verify
+with `rustc --version` (should report `1.85.0` or later).
+
+### Build from source
+
+```sh
+git clone <repo-url> combinr
+cd combinr
 cargo build --release
-# binary: target/release/combinr
+# optimized binary lands at: target/release/combinr
+./target/release/combinr --help
+```
+
+The first build downloads and compiles dependencies and takes a few minutes;
+later builds are incremental. Drop `--release` for a faster-compiling, slower
+debug build under `target/debug/`.
+
+### Install onto your PATH
+
+`cargo install` compiles in release mode and copies the binary into `~/.cargo/bin`
+(which rustup already adds to your `PATH`):
+
+```sh
+cargo install --path .              # from a local checkout
+# or straight from the repository:
+# cargo install --git <repo-url>
+combinr --version
+```
+
+### Run the tests (optional)
+
+The suite is self-contained. It checks combinr against committed golden
+references, so no PASA or EVidenceModeler installation is required:
+
+```sh
+cargo test
 ```
 
 ## Usage
@@ -95,8 +143,8 @@ combinr consensus --weights weights.txt --genome genome.fa \
 ```
 
 `consensus` options: `--strict` (drop low-support genes instead of flagging),
-`--genetic-code/-g`, `--flank <bp>` (per-locus DP-window padding, default 10000 —
-only widens the window for UTR/end placement, never merges loci), and the
+`--genetic-code/-g`, `--flank <bp>` (per-locus DP-window padding, default 10000.
+Only widens the window for UTR/end placement, never merges loci), and the
 off-by-default EVM heuristics `--research-intergenic <bp>` (re-search intergenic gaps
 for missed genes), `--search-long-introns <bp>` (find nested genes in long introns),
 `--extend-terminal-stop` (extend protein/transcript 3' ends to a stop to complete genes),
@@ -104,8 +152,8 @@ for missed genes), `--search-long-introns <bp>` (find nested genes in long intro
 `--promote-transcript-orfs` (at loci with only transcript evidence and no consensus CDS,
 find the longest ORF in the transcripts and emit it, tagged `support=transcript_orf`),
 `--alt-splice` (also emit each consensus locus's alternative transcript isoforms as extra
-mRNAs, with CDS derived from the consensus — inherited if matching, re-projected from the
-consensus start if divergent — and write a region-tagged alt-splice events TSV to
+mRNAs, with CDS derived from the consensus (inherited if matching, re-projected from the
+consensus start if divergent) and write a region-tagged alt-splice events TSV to
 `--events`), plus `--repeats <gff3>` (mask repeats from scoring).
 
 `assemble` tuning: `--fuzzlength <bp>` (default 20) and the quality filters
@@ -147,7 +195,7 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
   (`--format gtf`). Each transcript carries `sources=` (provenance) and
   `contains=` (contributing accessions).
 - **Alt-splice event report** as a TSV (`--events`) with the event type, coords,
-  the two isoforms, and — after the ORF step — the region (5'UTR / CDS / 3'UTR).
+  the two isoforms, and after the ORF step, the region (5'UTR / CDS / 3'UTR).
 - **Consensus gene models** (`consensus`) to stdout as GFF3 `gene`/`mRNA`/`exon`/`CDS`
   with CDS phases (the exon structure is the coding structure). Each mRNA carries
   `score`, `score_ratio`, `coding_length`, `low_support`, and `partial5`/`partial3`.
@@ -155,20 +203,20 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
 ## Correctness
 
 combinr is validated against the original PASA, using committed golden
-references so the test suite is self-contained — **no PASA code runs at test
+references so the test suite is self-contained, **no PASA code runs at test
 time**. Just `cargo test`.
 
-- **Assembly (Algorithm 1)** — the original C++ `pasa` binary's output on every
+- **Assembly (Algorithm 1)**:  the original C++ PASA binary's output on every
   `pasa_cpp_sample_input*` is committed under `tests/data/assembler/`.
   `tests/golden_assembler.rs` runs three combinr code paths (raw assembler,
   orientation wrapper, full GFF3 pipeline) and asserts each reproduces the golden
   assembly set.
-- **Alternative splicing (Algorithm 2)** — PASA's real
+- **Alternative splicing (Algorithm 2)**:  PASA's real
   `CDNA::Alternative_splice_comparer` was run on combinr's emitted isoforms and
   its events committed under `tests/data/altsplice/` (the `stringtie.gtf` fixture
   alone exercises all seven event types). `tests/golden_altsplice.rs` asserts
   combinr's classification reproduces them exactly.
-- **Consensus** — because `consensus` deliberately diverges from EVM (non-canonical
+- **Consensus**: because `consensus` deliberately diverges from EVM (non-canonical
   sites + two independent per-strand trellises), there is no byte-for-byte EVM parity
   to assert. Instead `tests/golden_consensus.rs` is a **self-golden**: it runs
   `consensus` on EVidenceModeler's `testing/` data set (vendored under
