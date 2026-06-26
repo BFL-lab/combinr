@@ -1,0 +1,25 @@
+Provenance of files in this directory
+=====================================
+
+Golden references — derived from PASA
+-------------------------------------
+  altsplice_small.events.golden
+  stringtie.events.golden
+
+Alternative-splicing event sets produced by PASA's real
+`CDNA::Alternative_splice_comparer`, run once on combinr's emitted isoforms and
+committed as frozen references:
+  https://github.com/PASApipeline/PASApipeline
+
+  Copyright (c) 2012, The Broad Institute, Inc.
+  Redistributed under the BSD 3-Clause License (see the LICENSE file at the
+  repository root, which retains this notice).
+
+Input fixtures
+--------------
+  altsplice_small.gtf   A small transcript-model fixture.
+  stringtie.gtf         StringTie-assembled transcripts used as input (exercises
+                        all seven alt-splice event types).
+
+These are combinr's test inputs, not PASA material. No PASA code runs at test
+time.

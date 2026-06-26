@@ -1,0 +1,20 @@
+Provenance of files in this directory
+=====================================
+
+These fixtures validate combinr's assembler (Algorithm 1) against PASA.
+
+  pasa_cpp_sample_input*          Sample inputs in PASA's C++ `pasa` token
+                                  format (including the `_minusFL` variants).
+  pasa_cpp_sample_input*.golden   The corresponding output of the original PASA
+                                  C++ `pasa` binary, committed as a frozen
+                                  reference.
+
+Derived from PASA (PASApipeline):
+  https://github.com/PASApipeline/PASApipeline
+
+  Copyright (c) 2012, The Broad Institute, Inc.
+  Redistributed under the BSD 3-Clause License (see the LICENSE file at the
+  repository root, which retains this notice).
+
+The goldens were generated once from a PASA checkout; the one-off generation
+tooling is preserved in git history. No PASA code runs at test time.
