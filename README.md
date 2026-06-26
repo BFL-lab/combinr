@@ -48,10 +48,13 @@ coding structure).
   isoform's ORF stop). Multiple coding models per locus are supported.
 - **Genetic code.** Divergent-isoform stop detection uses the standard code
   (NCBI table 1) by default; pass `--genetic-code/-g <id>` to the `assemble`
-  reconcile step or `consensus` for a non-standard table. Supported: NCBI tables `1-6`, `9-16`, `21-26`
-  (codes are grouped by stop-codon set, since only stop assignments affect ORF
-  bounds; matching isoforms inherit the predicted CDS and are unaffected by the
-  code). Tables with context-dependent stops (`27-31`, `33`) are not supported.
+  reconcile step or `consensus` for a non-standard table. Every assigned NCBI
+  table is supported: `1-6`, `9-16`, `21-33` (ids 7, 8, and 17–20 were never
+  assigned and are rejected). Codes are grouped by stop-codon set, since only stop
+  assignments affect ORF bounds; matching isoforms inherit the predicted CDS and
+  are unaffected by the code. The context-dependent tables (27/28/31, whose codons
+  are dual sense/stop) use NCBI's declared stop set — translation halts at the
+  first such codon, the conservative choice for CDS bounds.
 - **Consensus never blanks a locus (`consensus`).** EVM eliminates a gene whose
   coding/noncoding score ratio falls below a threshold, which can leave a locus empty.
   combinr computes the same metric but **flags** low-support genes (`low_support=true`)
@@ -92,7 +95,8 @@ combinr consensus --weights weights.txt --genome genome.fa \
 ```
 
 `consensus` options: `--strict` (drop low-support genes instead of flagging),
-`--genetic-code/-g`, `--flank <bp>` (locus padding, default 10000), and the
+`--genetic-code/-g`, `--flank <bp>` (per-locus DP-window padding, default 10000 —
+only widens the window for UTR/end placement, never merges loci), and the
 off-by-default EVM heuristics `--research-intergenic <bp>` (re-search intergenic gaps
 for missed genes), `--search-long-introns <bp>` (find nested genes in long introns),
 `--extend-terminal-stop` (extend protein/transcript 3' ends to a stop to complete genes),
@@ -110,7 +114,10 @@ consensus start if divergent — and write a region-tagged alt-splice events TSV
 long-range junctions; pass `--max-intron 0` to disable the cap).
 
 Shared options, given *after* the subcommand name (e.g. `combinr consensus
---threads 4 ...`): `--format gff3|gtf`, `--threads <n>`, `--verbose`.
+--threads 4 ...`): `--output/-o <file>` (write models to a file instead of stdout,
+the default), `--format gff3|gtf`, `--threads <n>` (default 4; `0` = all cores),
+and `--verbose`. The `> out.gff3` redirections above are interchangeable with
+`-o out.gff3`.
 
 ## Input
 
