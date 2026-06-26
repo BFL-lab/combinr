@@ -28,7 +28,7 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
         .into_iter()
         .enumerate()
         .map(|(i, g)| {
-            let gene_id = format!("evm.{}.g{}", g.contig, i + 1);
+            let gene_id = format!("consensus.{}.g{}", g.contig, i + 1);
             let lend = gene_lend(g);
             let rend = gene_rend(g);
             // Promoted transcript-ORF genes have no consensus noncoding baseline, so the

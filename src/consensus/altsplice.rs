@@ -44,7 +44,7 @@ pub fn annotate(
     let mut out_genes = Vec::with_capacity(order.len());
     for (rank, &gi) in order.iter().enumerate() {
         let g = &genes[gi];
-        let gene_id = format!("evm.{}.g{}", g.contig, rank + 1);
+        let gene_id = format!("consensus.{}.g{}", g.contig, rank + 1);
 
         // Partition the consensus gene's hosting isoforms. An isoform that leaves the
         // CDS unchanged (`coding_altered == false`) is the SAME coding model as the
