@@ -5,7 +5,7 @@ combinr is a Rust reimplementation of evidence-combining algorithms from PASA
 the BSD 3-Clause License, and combinr inherits the same terms. Their original
 copyright notices are retained below as that license requires.
 
-Copyright (c) 2026, the combinr authors
+Copyright (c) 2026, Matt Sarrasin (combinr)
 Copyright (c) 2012, The Broad Institute, Inc. (PASA / PASApipeline)
 Copyright (c) 2008, Brian Haas (EVidenceModeler)
 All rights reserved.
