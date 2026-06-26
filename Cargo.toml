@@ -2,7 +2,20 @@
 name = "combinr"
 version = "0.1.0"
 edition = "2024"
+description = "PASA + EVidenceModeler evidence-combining genome-annotation algorithms as a single self-contained Rust binary"
+repository = "https://github.com/BFL-lab/combinr"
 license = "BSD-3-Clause"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [dependencies]
 anyhow = "1.0.102"
