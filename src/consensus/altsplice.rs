@@ -45,21 +45,42 @@ pub fn annotate(
     for (rank, &gi) in order.iter().enumerate() {
         let g = &genes[gi];
         let gene_id = format!("evm.{}.g{}", g.contig, rank + 1);
-        let mut transcripts = vec![consensus_mrna(g, &gene_id)];
 
+        // Partition the consensus gene's hosting isoforms. An isoform that leaves the
+        // CDS unchanged (`coding_altered == false`) is the SAME coding model as the
+        // bare consensus — it only clothes it in UTRs — so emitting both produces two
+        // mRNAs with identical CDS, one with UTRs and one without. Instead we fold the
+        // best such isoform's UTRs onto the single consensus mRNA and drop the rest.
+        // Only `coding_altered == true` isoforms are genuine alternatives that earn
+        // their own mRNA. (The old `iso.exons == g.exons` test only deduped the no-UTR
+        // case, since the consensus exons are CDS-only and a UTR-bearing isoform's
+        // exons never match them.)
+        let mut utr_donor: Option<(&Isoform, &CodingAnnotation)> = None;
+        let mut alt_isoforms: Vec<(&Isoform, &CodingAnnotation)> = Vec::new();
         if let Some(mid) = &model_id_for[gi] {
             for (idx, iso) in asr.isoforms.iter().enumerate() {
-                if iso.exons == g.exons {
-                    continue; // identical to the consensus mRNA already emitted
-                }
-                if let Some(ann) = recon.isoform_codings[idx]
+                let Some(ann) = recon.isoform_codings[idx]
                     .iter()
                     .find(|c| &c.model_id == mid)
-                {
-                    let n = transcripts.len();
-                    transcripts.push(iso_mrna(iso, ann, &gene_id, n));
+                else {
+                    continue;
+                };
+                if ann.coding_altered {
+                    alt_isoforms.push((iso, ann));
+                } else if iso.exons != g.exons && more_utr(utr_donor, iso) {
+                    // skips an isoform whose exons exactly equal the CDS-only
+                    // consensus (no UTRs to contribute)
+                    utr_donor = Some((iso, ann));
                 }
             }
+        }
+
+        // The consensus mRNA — dressed in UTRs from the best CDS-identical isoform when
+        // the base consensus has none of its own.
+        let mut transcripts = vec![consensus_mrna(g, &gene_id, utr_donor)];
+        for (iso, ann) in alt_isoforms {
+            let n = transcripts.len();
+            transcripts.push(iso_mrna(iso, ann, &gene_id, n));
         }
 
         let (lend, rend) = span_of(&transcripts);
@@ -96,7 +117,17 @@ fn to_cds_model(g: &CalledGene, id: String) -> Option<CdsModel> {
 }
 
 /// The consensus model itself as an mRNA (mirrors `consensus::output::to_out_genes`).
-fn consensus_mrna(g: &CalledGene, gene_id: &str) -> OutTranscript {
+///
+/// When the base consensus carries no UTRs of its own but a CDS-identical transcript
+/// isoform does (`utr_donor`), the consensus adopts that isoform's exon structure and
+/// UTRs — so the single consensus mRNA carries them rather than being duplicated by a
+/// separate UTR-bearing isoform. The donor's transcript provenance is recorded so the
+/// UTR support is traceable.
+fn consensus_mrna(
+    g: &CalledGene,
+    gene_id: &str,
+    utr_donor: Option<(&Isoform, &CodingAnnotation)>,
+) -> OutTranscript {
     let ratio = if g.promoted {
         "NA".to_string()
     } else if g.support.score_ratio.is_finite() {
@@ -109,29 +140,58 @@ fn consensus_mrna(g: &CalledGene, gene_id: &str) -> OutTranscript {
     } else {
         "consensus"
     };
+    let mut attrs = vec![
+        ("support".into(), vec![support.to_string()]),
+        ("score".into(), vec![format!("{:.1}", g.score)]),
+        ("score_ratio".into(), vec![ratio]),
+        (
+            "coding_length".into(),
+            vec![g.support.coding_length.to_string()],
+        ),
+        (
+            "low_support".into(),
+            vec![g.support.low_support.to_string()],
+        ),
+        ("partial5".into(), vec![g.partial5.to_string()]),
+        ("partial3".into(), vec![g.partial3.to_string()]),
+    ];
+
+    // Adopt the donor's UTRs only when the base consensus has none of its own.
+    let graft = utr_donor.filter(|_| g.five_utr.is_empty() && g.three_utr.is_empty());
+    let (exons, five_utr, three_utr) = match graft {
+        Some((iso, ann)) => {
+            let sources: Vec<String> = iso.source_set.iter().map(|s| s.to_string()).collect();
+            if !sources.is_empty() {
+                attrs.push(("sources".into(), sources));
+            }
+            if !iso.contained_accs.is_empty() {
+                attrs.push(("contains".into(), iso.contained_accs.clone()));
+            }
+            (iso.exons.clone(), ann.five_utr.clone(), ann.three_utr.clone())
+        }
+        None => (g.exons.clone(), g.five_utr.clone(), g.three_utr.clone()),
+    };
+
     OutTranscript {
         transcript_id: format!("{gene_id}.consensus"),
         contig: g.contig.clone(),
         strand: g.orient,
-        exons: g.exons.clone(),
+        exons,
         cds: g.cds.clone(),
-        five_utr: g.five_utr.clone(),
-        three_utr: g.three_utr.clone(),
-        attrs: vec![
-            ("support".into(), vec![support.to_string()]),
-            ("score".into(), vec![format!("{:.1}", g.score)]),
-            ("score_ratio".into(), vec![ratio]),
-            (
-                "coding_length".into(),
-                vec![g.support.coding_length.to_string()],
-            ),
-            (
-                "low_support".into(),
-                vec![g.support.low_support.to_string()],
-            ),
-            ("partial5".into(), vec![g.partial5.to_string()]),
-            ("partial3".into(), vec![g.partial3.to_string()]),
-        ],
+        five_utr,
+        three_utr,
+        attrs,
+    }
+}
+
+/// Whether `cand` contributes more UTR coverage than the current donor (larger total
+/// exon span; the consensus CDS is identical across all candidates, so more exon span
+/// means more UTR). Deterministic: ties keep the incumbent.
+fn more_utr(current: Option<(&Isoform, &CodingAnnotation)>, cand: &Isoform) -> bool {
+    let span = |ex: &[crate::model::Coordset]| -> i64 { ex.iter().map(|c| c.rend - c.lend).sum() };
+    match current {
+        None => true,
+        Some((iso, _)) => span(&cand.exons) > span(&iso.exons),
     }
 }
 
@@ -316,5 +376,49 @@ mod tests {
         let (out, _) = annotate(&[gene], asr, &genome, &GeneticCode::default());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].transcripts.len(), 1);
+    }
+
+    #[test]
+    fn utr_only_isoform_folds_into_single_consensus_mrna() {
+        // The consensus CDS is [(10,40),(60,90)] with no UTRs of its own. A transcript
+        // isoform hosts the IDENTICAL CDS (same intron 41..59, contains the model start
+        // 10 and stop 90) but extends the flanking exons to add UTRs. It must NOT spawn
+        // a second mRNA — the single consensus mRNA adopts its UTRs instead.
+        let genome = write_fasta(&[b'C'; 110]);
+        let gene = consensus_gene(&[(10, 40), (60, 90)]);
+        let isoforms = vec![iso("t1", &[(1, 40), (60, 100)])];
+        let loci = vec![Locus {
+            id: "L1".into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            isoform_indices: vec![0],
+        }];
+        let asr = AltSpliceResult {
+            isoforms,
+            loci,
+            events: vec![],
+        };
+
+        let (out, _events) = annotate(&[gene], asr, &genome, &GeneticCode::default());
+        assert_eq!(out.len(), 1);
+        let mrnas = &out[0].transcripts;
+        // Exactly one mRNA: the consensus, now carrying the isoform's UTRs.
+        assert_eq!(mrnas.len(), 1, "CDS-identical UTR isoform must not duplicate the consensus");
+        let m = &mrnas[0];
+        assert!(m.transcript_id.ends_with(".consensus"));
+        assert!(
+            m.attrs
+                .iter()
+                .any(|(k, v)| k == "support" && v == &vec!["consensus".to_string()])
+        );
+        assert!(!m.five_utr.is_empty(), "5' UTR grafted from the isoform");
+        assert!(!m.three_utr.is_empty(), "3' UTR grafted from the isoform");
+        // The consensus mRNA adopts the isoform's UTR-extended exon structure...
+        assert_eq!(m.exons.first().unwrap().lend, 1);
+        assert_eq!(m.exons.last().unwrap().rend, 100);
+        // ...while keeping the consensus CDS unchanged...
+        assert_eq!(m.cds, vec![cs(10, 40), cs(60, 90)]);
+        // ...and records the UTR donor's provenance.
+        assert!(m.attrs.iter().any(|(k, _)| k == "contains"));
     }
 }
