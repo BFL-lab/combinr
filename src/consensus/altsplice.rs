@@ -13,8 +13,9 @@ use crate::altsplice::{AltSpliceResult, EventRecord, Isoform};
 use crate::consensus::engine::CalledGene;
 use crate::io::fasta::Fasta;
 use crate::io::out_model::{OutGene, OutTranscript};
-use crate::model::Strand;
+use crate::model::{Coordset, Strand};
 use crate::orf::{CdsModel, CodingAnnotation, GeneticCode, reconcile};
+use std::collections::BTreeSet;
 
 /// Annotate consensus genes with their alternative transcript isoforms. Returns the
 /// output genes (consensus mRNA + hosting isoform mRNAs each) and the region-tagged
@@ -41,21 +42,22 @@ pub fn annotate(
 
     let recon = reconcile(&asr.isoforms, &asr.loci, asr.events, &models, genome, code);
 
+    // Precomputed once: each isoform's introns, reused by the per-gene UTR salvage.
+    let iso_introns: Vec<Vec<Coordset>> = asr.isoforms.iter().map(|iso| iso.introns()).collect();
+
     let mut out_genes = Vec::with_capacity(order.len());
     for (rank, &gi) in order.iter().enumerate() {
         let g = &genes[gi];
         let gene_id = format!("consensus.{}.g{}", g.contig, rank + 1);
 
-        // Partition the consensus gene's hosting isoforms. An isoform that leaves the
-        // CDS unchanged (`coding_altered == false`) is the SAME coding model as the
-        // bare consensus — it only clothes it in UTRs — so emitting both produces two
-        // mRNAs with identical CDS, one with UTRs and one without. Instead we fold the
-        // best such isoform's UTRs onto the single consensus mRNA and drop the rest.
-        // Only `coding_altered == true` isoforms are genuine alternatives that earn
-        // their own mRNA. (The old `iso.exons == g.exons` test only deduped the no-UTR
-        // case, since the consensus exons are CDS-only and a UTR-bearing isoform's
-        // exons never match them.)
-        let mut utr_donor: Option<(&Isoform, &CodingAnnotation)> = None;
+        // An isoform earns its OWN mRNA only when it is a genuine alternative: it
+        // introduces a novel splice junction (`coding_altered` AND not a mere terminal
+        // truncation; see `is_terminal_truncation`). Everything else — the CDS-identical
+        // isoforms and the no-novel-junction terminal truncations — is the same coding
+        // model the consensus already represents, so it spawns no second mRNA; its only
+        // contribution is UTR, folded onto the single consensus mRNA by `salvage_utrs`.
+        // (Dropping the spurious truncation mRNAs mirrors PASA subsuming a contained
+        // alignment and EVM never minting a terminal exon at a truncation point.)
         let mut alt_isoforms: Vec<(&Isoform, &CodingAnnotation)> = Vec::new();
         if let Some(mid) = &model_id_for[gi] {
             for (idx, iso) in asr.isoforms.iter().enumerate() {
@@ -65,19 +67,18 @@ pub fn annotate(
                 else {
                     continue;
                 };
-                if ann.coding_altered {
+                if ann.coding_altered && !is_terminal_truncation(iso, g, ann) {
                     alt_isoforms.push((iso, ann));
-                } else if iso.exons != g.exons && more_utr(utr_donor, iso) {
-                    // skips an isoform whose exons exactly equal the CDS-only
-                    // consensus (no UTRs to contribute)
-                    utr_donor = Some((iso, ann));
                 }
             }
         }
 
-        // The consensus mRNA — dressed in UTRs from the best CDS-identical isoform when
-        // the base consensus has none of its own.
-        let mut transcripts = vec![consensus_mrna(g, &gene_id, utr_donor)];
+        // Assemble the consensus mRNA's 5'/3' UTRs from every transcript compatible with
+        // its CDS — taking each end from whichever transcript extends it furthest, even a
+        // transcript truncated at the other end (a 3'-truncated fragment still yields a
+        // valid 5'UTR; a 5'-truncated one a valid 3'UTR).
+        let utrs = salvage_utrs(g, &asr.isoforms, &iso_introns);
+        let mut transcripts = vec![consensus_mrna(g, &gene_id, &utrs)];
         for (iso, ann) in alt_isoforms {
             let n = transcripts.len();
             transcripts.push(iso_mrna(iso, ann, &gene_id, n));
@@ -118,16 +119,11 @@ fn to_cds_model(g: &CalledGene, id: String) -> Option<CdsModel> {
 
 /// The consensus model itself as an mRNA (mirrors `consensus::output::to_out_genes`).
 ///
-/// When the base consensus carries no UTRs of its own but a CDS-identical transcript
-/// isoform does (`utr_donor`), the consensus adopts that isoform's exon structure and
-/// UTRs — so the single consensus mRNA carries them rather than being duplicated by a
-/// separate UTR-bearing isoform. The donor's transcript provenance is recorded so the
-/// UTR support is traceable.
-fn consensus_mrna(
-    g: &CalledGene,
-    gene_id: &str,
-    utr_donor: Option<(&Isoform, &CodingAnnotation)>,
-) -> OutTranscript {
+/// When the base consensus carries no UTRs of its own, it adopts the UTRs assembled
+/// from compatible transcript evidence (`utrs`, from [`salvage_utrs`]): its CDS-only
+/// exon structure is extended with the salvaged 5'/3' UTR segments, and the donor
+/// transcripts' provenance is recorded so the UTR support is traceable.
+fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
     let ratio = if g.promoted {
         "NA".to_string()
     } else if g.support.score_ratio.is_finite() {
@@ -156,20 +152,23 @@ fn consensus_mrna(
         ("partial3".into(), vec![g.partial3.to_string()]),
     ];
 
-    // Adopt the donor's UTRs only when the base consensus has none of its own.
-    let graft = utr_donor.filter(|_| g.five_utr.is_empty() && g.three_utr.is_empty());
-    let (exons, five_utr, three_utr) = match graft {
-        Some((iso, ann)) => {
-            let sources: Vec<String> = iso.source_set.iter().map(|s| s.to_string()).collect();
-            if !sources.is_empty() {
-                attrs.push(("sources".into(), sources));
-            }
-            if !iso.contained_accs.is_empty() {
-                attrs.push(("contains".into(), iso.contained_accs.clone()));
-            }
-            (iso.exons.clone(), ann.five_utr.clone(), ann.three_utr.clone())
+    // Adopt the salvaged UTRs only when the base consensus has none of its own; extend
+    // the CDS-only exon structure with the UTR segments (merging the UTR that abuts a
+    // terminal CDS exon into it, keeping any spliced UTR exon separate).
+    let use_salvage = g.five_utr.is_empty() && g.three_utr.is_empty() && !utrs.is_empty();
+    let (exons, five_utr, three_utr) = if use_salvage {
+        if !utrs.sources.is_empty() {
+            attrs.push(("sources".into(), utrs.sources.clone()));
         }
-        None => (g.exons.clone(), g.five_utr.clone(), g.three_utr.clone()),
+        if !utrs.contains.is_empty() {
+            attrs.push(("contains".into(), utrs.contains.clone()));
+        }
+        let mut all = g.cds.clone();
+        all.extend_from_slice(&utrs.five);
+        all.extend_from_slice(&utrs.three);
+        (merge_coords(all), utrs.five.clone(), utrs.three.clone())
+    } else {
+        (g.exons.clone(), g.five_utr.clone(), g.three_utr.clone())
     };
 
     OutTranscript {
@@ -184,15 +183,197 @@ fn consensus_mrna(
     }
 }
 
-/// Whether `cand` contributes more UTR coverage than the current donor (larger total
-/// exon span; the consensus CDS is identical across all candidates, so more exon span
-/// means more UTR). Deterministic: ties keep the incumbent.
-fn more_utr(current: Option<(&Isoform, &CodingAnnotation)>, cand: &Isoform) -> bool {
-    let span = |ex: &[crate::model::Coordset]| -> i64 { ex.iter().map(|c| c.rend - c.lend).sum() };
-    match current {
-        None => true,
-        Some((iso, _)) => span(&cand.exons) > span(&iso.exons),
+/// UTRs assembled for a consensus mRNA from compatible transcript evidence.
+#[derive(Default)]
+struct Utrs {
+    five: Vec<Coordset>,
+    three: Vec<Coordset>,
+    sources: Vec<String>,
+    contains: Vec<String>,
+}
+
+impl Utrs {
+    fn is_empty(&self) -> bool {
+        self.five.is_empty() && self.three.is_empty()
     }
+}
+
+/// Introns (gaps) between consecutive lend-sorted segments.
+fn seg_introns(segs: &[Coordset]) -> Vec<Coordset> {
+    segs.windows(2)
+        .map(|w| Coordset {
+            lend: w[0].rend + 1,
+            rend: w[1].lend - 1,
+        })
+        .collect()
+}
+
+/// The introns lying wholly within `[lo, hi]`.
+fn within(introns: &[Coordset], lo: i64, hi: i64) -> Vec<Coordset> {
+    introns
+        .iter()
+        .copied()
+        .filter(|i| i.lend >= lo && i.rend <= hi)
+        .collect()
+}
+
+/// Whether `iso_exons` shares EVERY splice junction with the consensus CDS over the
+/// genomic span the two overlap — i.e. it introduces no novel junction (no alternate
+/// donor/acceptor, retained intron or exon skip) there. Differences are confined to the
+/// terminal exons, so it is the same spliced structure, just possibly truncated and/or
+/// UTR-extended. `iso_introns`/`cds_introns` are precomputed [`seg_introns`].
+fn shares_junctions(
+    iso_exons: &[Coordset],
+    iso_introns: &[Coordset],
+    cds: &[Coordset],
+    cds_introns: &[Coordset],
+) -> bool {
+    let (Some(i0), Some(il)) = (iso_exons.first(), iso_exons.last()) else {
+        return false;
+    };
+    let (Some(c0), Some(cl)) = (cds.first(), cds.last()) else {
+        return false;
+    };
+    let lo = i0.lend.max(c0.lend);
+    let hi = il.rend.min(cl.rend);
+    if lo > hi {
+        return false;
+    }
+    within(iso_introns, lo, hi) == within(cds_introns, lo, hi)
+}
+
+/// `exons` material strictly beyond `bound`: with `above`, the parts right of `bound`
+/// (clipped to start at `bound+1`); otherwise the parts left of `bound` (clipped to end
+/// at `bound-1`). Carves a UTR out of a transcript relative to the start/stop codon.
+fn clip_beyond(exons: &[Coordset], bound: i64, above: bool) -> Vec<Coordset> {
+    let mut out = Vec::new();
+    for e in exons {
+        if above {
+            if e.rend > bound {
+                out.push(Coordset {
+                    lend: e.lend.max(bound + 1),
+                    rend: e.rend,
+                });
+            }
+        } else if e.lend < bound {
+            out.push(Coordset {
+                lend: e.lend,
+                rend: e.rend.min(bound - 1),
+            });
+        }
+    }
+    out
+}
+
+/// Whether any exon spans the genomic position `pos`.
+fn covers(exons: &[Coordset], pos: i64) -> bool {
+    exons.iter().any(|e| e.lend <= pos && pos <= e.rend)
+}
+
+/// Merge overlapping or directly adjacent segments (sorted, coalesced).
+fn merge_coords(mut segs: Vec<Coordset>) -> Vec<Coordset> {
+    segs.sort_by_key(|c| (c.lend, c.rend));
+    let mut out: Vec<Coordset> = Vec::new();
+    for s in segs {
+        match out.last_mut() {
+            Some(last) if s.lend <= last.rend + 1 => {
+                if s.rend > last.rend {
+                    last.rend = s.rend;
+                }
+            }
+            _ => out.push(s),
+        }
+    }
+    out
+}
+
+fn total_len(segs: &[Coordset]) -> i64 {
+    segs.iter().map(|c| c.rend - c.lend + 1).sum()
+}
+
+/// Assemble the consensus gene's UTRs from the transcript isoforms compatible with its
+/// CDS. A transcript donates a 5'UTR when it spans the start codon (its material beyond
+/// the start) and a 3'UTR when it spans the stop codon (its material beyond the stop);
+/// each end takes the longest such donor independently, so a 3'-truncated fragment can
+/// still supply the 5'UTR and a 5'-truncated one the 3'UTR (the latter never reaches the
+/// start codon, so the start-anchored [`graft`] cannot see it — hence this separate
+/// scan over all isoforms). Only transcripts sharing every junction with the CDS
+/// contribute; genuine alternatives are excluded.
+fn salvage_utrs(g: &CalledGene, isoforms: &[Isoform], iso_introns: &[Vec<Coordset>]) -> Utrs {
+    let mut out = Utrs::default();
+    let (Some(cds0), Some(cdsl)) = (g.cds.first(), g.cds.last()) else {
+        return out;
+    };
+    let cds_introns = seg_introns(&g.cds);
+    let minus = g.orient == Strand::Minus;
+    // start/stop genomic = the 5'/3'-most CDS base for the strand.
+    let (start_g, stop_g) = if minus {
+        (cdsl.rend, cds0.lend)
+    } else {
+        (cds0.lend, cdsl.rend)
+    };
+    let (mut best_five, mut best_three) = (0i64, 0i64);
+    let mut five_donor: Option<&Isoform> = None;
+    let mut three_donor: Option<&Isoform> = None;
+    for (i, iso) in isoforms.iter().enumerate() {
+        if iso.strand != g.orient {
+            continue;
+        }
+        let (Some(i0), Some(il)) = (iso.exons.first(), iso.exons.last()) else {
+            continue;
+        };
+        if il.rend < cds0.lend || i0.lend > cdsl.rend {
+            continue; // no genomic overlap with the CDS
+        }
+        if !shares_junctions(&iso.exons, &iso_introns[i], &g.cds, &cds_introns) {
+            continue;
+        }
+        if covers(&iso.exons, start_g) {
+            let five = clip_beyond(&iso.exons, start_g, minus);
+            let l = total_len(&five);
+            if l > best_five {
+                best_five = l;
+                out.five = five;
+                five_donor = Some(iso);
+            }
+        }
+        if covers(&iso.exons, stop_g) {
+            let three = clip_beyond(&iso.exons, stop_g, !minus);
+            let l = total_len(&three);
+            if l > best_three {
+                best_three = l;
+                out.three = three;
+                three_donor = Some(iso);
+            }
+        }
+    }
+    // Provenance from the (up to two) winning donors.
+    let mut sources: BTreeSet<String> = BTreeSet::new();
+    for d in [five_donor, three_donor].into_iter().flatten() {
+        for s in &d.source_set {
+            sources.insert(s.to_string());
+        }
+        for a in &d.contained_accs {
+            if !out.contains.contains(a) {
+                out.contains.push(a.clone());
+            }
+        }
+    }
+    out.sources = sources.into_iter().collect();
+    out
+}
+
+/// Whether `iso` is a pure terminal truncation of consensus gene `g` rather than a
+/// genuine alternative isoform: the grafted ORF ran off an incomplete end
+/// (`ann.partial3`) and the isoform introduces no novel splice junction
+/// ([`shares_junctions`]), so it is the same coding model, merely incomplete —
+/// `coding_altered` was set only because it lost terminal exons and the stop codon, so
+/// it must not earn its own mRNA. (Its UTR, if any, is still salvaged onto the consensus
+/// by [`salvage_utrs`].) Mirrors PASA subsuming a contained alignment and EVM never
+/// minting a terminal exon at a truncation point; a retained intron / alternate
+/// donor-acceptor / exon skip perturbs the shared-span junctions and is kept.
+fn is_terminal_truncation(iso: &Isoform, g: &CalledGene, ann: &CodingAnnotation) -> bool {
+    ann.partial3 && shares_junctions(&iso.exons, &iso.introns(), &g.cds, &seg_introns(&g.cds))
 }
 
 /// A transcript isoform as an alternative mRNA, with the consensus CDS grafted on.
@@ -420,5 +601,157 @@ mod tests {
         assert_eq!(m.cds, vec![cs(10, 40), cs(60, 90)]);
         // ...and records the UTR donor's provenance.
         assert!(m.attrs.iter().any(|(k, _)| k == "contains"));
+    }
+
+    #[test]
+    fn truncated_isoform_is_dropped_not_emitted() {
+        // A 3'-truncated transcript FRAGMENT: it shares the consensus's 5' exons and
+        // introns but is MISSING the terminal exon, so its ORF runs off the end with no
+        // stop (partial3) and `graft` marks it coding_altered. It introduces NO novel
+        // junction, so it is an incomplete copy of the consensus, not a genuine
+        // alternative — it must be dropped, leaving a single consensus mRNA. (PASA
+        // subsumes such a contained fragment; EVM never creates a terminal exon at the
+        // truncation point. Regression for the GEEHB_01841 spurious-isoform bug.)
+        let mut g = vec![b'C'; 150];
+        g[9] = b'A';
+        g[10] = b'T';
+        g[11] = b'G'; // start codon at the consensus start (genomic 10)
+        let genome = write_fasta(&g);
+
+        let gene = consensus_gene(&[(10, 40), (60, 90), (110, 140)]);
+        // fragment: top two exons only; the terminal (110,140) exon is lost.
+        let isoforms = vec![iso("frag", &[(10, 40), (60, 90)])];
+        let loci = vec![Locus {
+            id: "L1".into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            isoform_indices: vec![0],
+        }];
+        let asr = AltSpliceResult {
+            isoforms,
+            loci,
+            events: vec![],
+        };
+
+        let (out, _events) = annotate(&[gene], asr, &genome, &GeneticCode::default());
+        assert_eq!(out.len(), 1);
+        let mrnas = &out[0].transcripts;
+        assert_eq!(
+            mrnas.len(),
+            1,
+            "a no-novel-junction 3'-truncated fragment must not earn its own mRNA"
+        );
+        assert!(mrnas[0].transcript_id.ends_with(".consensus"));
+    }
+
+    #[test]
+    fn single_exon_truncated_isoform_is_dropped() {
+        // The single-exon analogue (147 of the 246 GEEHB run cases): a single-exon
+        // consensus and a single-exon transcript that covers only part of it and runs
+        // off the end (partial3). Empty intron chains are trivially equal, so the
+        // truncation test fires and the fragment is dropped.
+        let mut g = vec![b'C'; 160];
+        g[9] = b'A';
+        g[10] = b'T';
+        g[11] = b'G';
+        let genome = write_fasta(&g);
+
+        let gene = consensus_gene(&[(10, 140)]);
+        let isoforms = vec![iso("frag", &[(10, 90)])];
+        let loci = vec![Locus {
+            id: "L1".into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            isoform_indices: vec![0],
+        }];
+        let asr = AltSpliceResult {
+            isoforms,
+            loci,
+            events: vec![],
+        };
+
+        let (out, _events) = annotate(&[gene], asr, &genome, &GeneticCode::default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].transcripts.len(),
+            1,
+            "a single-exon 3'-truncated fragment must not earn its own mRNA"
+        );
+    }
+
+    #[test]
+    fn truncated_fragment_donates_its_five_utr_to_the_consensus() {
+        // A 3'-truncated fragment (dropped as its own mRNA) still carries a valid 5'UTR.
+        // That UTR must be folded onto the single consensus mRNA — not lost.
+        let mut g = vec![b'C'; 120];
+        g[19] = b'A';
+        g[20] = b'T';
+        g[21] = b'G'; // start codon at genomic 20
+        let genome = write_fasta(&g);
+
+        let gene = consensus_gene(&[(20, 40), (60, 90)]);
+        // fragment shares the 5' CDS exon, extends it upstream to 10 (5'UTR 10..19), and
+        // is truncated at the 3' end (missing the (60,90) CDS exon) -> partial3, dropped.
+        let isoforms = vec![iso("frag", &[(10, 40)])];
+        let loci = vec![Locus {
+            id: "L1".into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            isoform_indices: vec![0],
+        }];
+        let asr = AltSpliceResult {
+            isoforms,
+            loci,
+            events: vec![],
+        };
+
+        let (out, _e) = annotate(&[gene], asr, &genome, &GeneticCode::default());
+        assert_eq!(out.len(), 1);
+        let mrnas = &out[0].transcripts;
+        assert_eq!(mrnas.len(), 1, "the fragment must not spawn a second mRNA");
+        let m = &mrnas[0];
+        assert!(m.transcript_id.ends_with(".consensus"));
+        assert_eq!(m.cds, vec![cs(20, 40), cs(60, 90)], "CDS unchanged");
+        assert_eq!(m.five_utr, vec![cs(10, 19)], "fragment's 5'UTR salvaged");
+        assert!(m.three_utr.is_empty(), "no bogus 3'UTR from the truncated end");
+        assert_eq!(m.exons.first().unwrap().lend, 10, "5'-terminal exon extended");
+    }
+
+    #[test]
+    fn five_prime_truncated_transcript_donates_its_three_utr() {
+        // A 5'-truncated transcript never reaches the start codon, so `graft` cannot host
+        // it; the standalone UTR scan must still recover its 3'UTR onto the consensus.
+        // This is the case the start-anchored machinery alone would miss.
+        let genome = write_fasta(&[b'C'; 130]);
+
+        let gene = consensus_gene(&[(20, 40), (60, 90)]); // stop codon at genomic 90 (+)
+        // covers the 3' CDS exon and extends past the stop to 110 (3'UTR 91..110), but
+        // never reaches the start codon at 20.
+        let isoforms = vec![iso("threep", &[(60, 110)])];
+        let loci = vec![Locus {
+            id: "L1".into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            isoform_indices: vec![0],
+        }];
+        let asr = AltSpliceResult {
+            isoforms,
+            loci,
+            events: vec![],
+        };
+
+        let (out, _e) = annotate(&[gene], asr, &genome, &GeneticCode::default());
+        assert_eq!(out.len(), 1);
+        let mrnas = &out[0].transcripts;
+        assert_eq!(mrnas.len(), 1, "a 5'-truncated UTR donor is not its own mRNA");
+        let m = &mrnas[0];
+        assert_eq!(m.cds, vec![cs(20, 40), cs(60, 90)], "CDS unchanged");
+        assert_eq!(
+            m.three_utr,
+            vec![cs(91, 110)],
+            "3'UTR recovered from a non-grafting transcript"
+        );
+        assert!(m.five_utr.is_empty());
+        assert_eq!(m.exons.last().unwrap().rend, 110, "3'-terminal exon extended");
     }
 }
