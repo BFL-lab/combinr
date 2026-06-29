@@ -1,6 +1,6 @@
 [package]
 name = "combinr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "PASA + EVidenceModeler evidence-combining genome-annotation algorithms as a single self-contained Rust binary"
 repository = "https://github.com/BFL-lab/combinr"
