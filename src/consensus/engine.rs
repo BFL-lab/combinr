@@ -330,9 +330,8 @@ fn collect_genes(
             .iter()
             .flat_map(|(g, _)| {
                 g.exon_indices.windows(2).filter_map(|w| {
-                    let il = rd.exons[w[0]].coords.rend + 1;
-                    let ir = rd.exons[w[1]].coords.lend - 1;
-                    (ir - il + 1 >= eng.search_long_introns).then_some((il, ir))
+                    let intron = rd.exons[w[0]].coords.gap_to(&rd.exons[w[1]].coords);
+                    (intron.len() >= eng.search_long_introns).then_some((intron.lend, intron.rend))
                 })
             })
             .collect()

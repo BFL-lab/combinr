@@ -36,7 +36,7 @@ impl Filters {
         }
         if self.min_intron.is_some() || self.max_intron.is_some() {
             for w in a.segments.windows(2) {
-                let intron_len = (w[1].coords.lend - 1) - (w[0].coords.rend + 1) + 1;
+                let intron_len = w[0].coords.gap_to(&w[1].coords).len();
                 if let Some(mn) = self.min_intron
                     && intron_len < mn
                 {

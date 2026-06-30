@@ -13,7 +13,7 @@ use crate::altsplice::{AltSpliceResult, EventRecord, Isoform};
 use crate::consensus::engine::CalledGene;
 use crate::io::fasta::Fasta;
 use crate::io::out_model::{OutGene, OutTranscript};
-use crate::model::{Coordset, Strand};
+use crate::model::{Coordset, Strand, introns_between};
 use crate::orf::{CdsModel, CodingAnnotation, GeneticCode, reconcile};
 use std::collections::BTreeSet;
 
@@ -200,12 +200,7 @@ impl Utrs {
 
 /// Introns (gaps) between consecutive lend-sorted segments.
 fn seg_introns(segs: &[Coordset]) -> Vec<Coordset> {
-    segs.windows(2)
-        .map(|w| Coordset {
-            lend: w[0].rend + 1,
-            rend: w[1].lend - 1,
-        })
-        .collect()
+    introns_between(segs).collect()
 }
 
 /// The introns lying wholly within `[lo, hi]`.
@@ -234,12 +229,14 @@ fn shares_junctions(
     let (Some(c0), Some(cl)) = (cds.first(), cds.last()) else {
         return false;
     };
-    let lo = i0.lend.max(c0.lend);
-    let hi = il.rend.min(cl.rend);
-    if lo > hi {
+    // The genomic span the iso and the CDS share; no shared span → no shared structure.
+    // (first.lend <= last.rend for lend-sorted exons, so `new` never swaps.)
+    let iso_span = Coordset::new(i0.lend, il.rend);
+    let cds_span = Coordset::new(c0.lend, cl.rend);
+    let Some(ov) = iso_span.intersect(&cds_span) else {
         return false;
-    }
-    within(iso_introns, lo, hi) == within(cds_introns, lo, hi)
+    };
+    within(iso_introns, ov.lend, ov.rend) == within(cds_introns, ov.lend, ov.rend)
 }
 
 /// `exons` material strictly beyond `bound`: with `above`, the parts right of `bound`

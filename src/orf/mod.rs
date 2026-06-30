@@ -25,7 +25,7 @@ use crate::altsplice::{EventRecord, Isoform, Locus, RegionClass};
 use crate::error::{CombinrError, Result};
 use crate::io::fasta::Fasta;
 use crate::io::gff3::parse_attrs;
-use crate::model::{Coordset, Strand};
+use crate::model::{Coordset, Strand, introns_between};
 use coords::SplicedTranscript;
 use std::collections::HashMap;
 use std::path::Path;
@@ -59,12 +59,7 @@ impl CdsModel {
 }
 
 fn cds_introns(segs: &[Coordset]) -> Vec<Coordset> {
-    segs.windows(2)
-        .map(|w| Coordset {
-            lend: w[0].rend + 1,
-            rend: w[1].lend - 1,
-        })
-        .collect()
+    introns_between(segs).collect()
 }
 
 /// One coding annotation grafted onto an isoform.

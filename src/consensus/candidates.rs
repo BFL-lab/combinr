@@ -416,10 +416,9 @@ impl Builder<'_> {
         for (weight, mut spans) in progs {
             spans.sort_by_key(|c| c.lend);
             for w in spans.windows(2) {
-                let gap_lend = w[0].rend + 1;
-                let gap_rend = w[1].lend - 1;
-                if gap_rend >= gap_lend {
-                    self.vectors.add_intergenic(gap_lend, gap_rend, weight);
+                let gap = w[0].gap_to(&w[1]);
+                if gap.rend >= gap.lend {
+                    self.vectors.add_intergenic(gap.lend, gap.rend, weight);
                 }
             }
         }
@@ -428,24 +427,23 @@ impl Builder<'_> {
     /// Every gap between consecutive links becomes an evidence-supported intron.
     fn add_introns(&mut self, chain: &EvidenceChain, is_abinitio: bool) {
         for w in chain.links.windows(2) {
-            let intron_lend = w[0].rend + 1;
-            let intron_rend = w[1].lend - 1;
-            if intron_rend - intron_lend + 1 < self.min_intron_length {
+            let intron = w[0].gap_to(&w[1]);
+            if intron.len() < self.min_intron_length {
                 continue;
             }
-            let unmasked = self.vectors.unmasked_len(intron_lend, intron_rend);
+            let unmasked = self.vectors.unmasked_len(intron.lend, intron.rend);
             if unmasked <= 0 {
                 continue;
             }
             self.introns.add(
-                (intron_lend, intron_rend),
+                (intron.lend, intron.rend),
                 chain.weight,
                 unmasked,
                 &chain.accession,
                 &chain.ev_type,
                 is_abinitio,
             );
-            self.sites.add_intron(intron_lend, intron_rend);
+            self.sites.add_intron(intron.lend, intron.rend);
         }
     }
 }

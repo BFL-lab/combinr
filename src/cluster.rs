@@ -107,7 +107,7 @@ pub fn cluster_spans_by_contig(spans: &[(String, Coordset)]) -> Vec<ContigCluste
 /// `min_frac` percent of the **shorter** span's genomic length. `min_frac <= 0.0`
 /// links on any single shared base (the historical any-overlap behavior).
 fn span_overlap_edge(a: Coordset, b: Coordset, min_frac: f64) -> bool {
-    let overlap_bp = a.rend.min(b.rend) - a.lend.max(b.lend) + 1;
+    let overlap_bp = a.overlap_len(&b);
     if overlap_bp <= 0 {
         return false; // no shared base → never linked
     }

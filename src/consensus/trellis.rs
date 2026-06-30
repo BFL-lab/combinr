@@ -78,11 +78,12 @@ fn are_compatible_exons(
         return -1.0;
     }
 
+    // the gap between the two exons (forward genomic coords): an evidence intron when
+    // phased, intergenic territory when unphased.
+    let gap = a.coords.gap_to(&b.coords);
     match link {
         Linkage::Phased => {
-            // intron = the gap between the two exons (forward genomic coords)
-            let intron = (a.coords.rend + 1, b.coords.lend - 1);
-            let Some(intron_score) = introns.score(intron) else {
+            let Some(intron_score) = introns.score((gap.lend, gap.rend)) else {
                 return -1.0; // no evidence-supported intron here
             };
             if !frame_transition_ok(a.end_frame, b.start_frame) {
@@ -93,9 +94,7 @@ fn are_compatible_exons(
             }
             intron_score
         }
-        Linkage::Intergenic => {
-            vectors.intergenic_score(a.coords.rend + 1, b.coords.lend - 1, intergenic_adjust)
-        }
+        Linkage::Intergenic => vectors.intergenic_score(gap.lend, gap.rend, intergenic_adjust),
         Linkage::Incompatible => -1.0,
     }
 }
@@ -273,10 +272,8 @@ fn finish_gene(
     let orient = exons[exon_indices[0]].orient;
     let mut score: f64 = exon_indices.iter().map(|&i| base_scores[i]).sum();
     for w in exon_indices.windows(2) {
-        let a = &exons[w[0]];
-        let b = &exons[w[1]];
-        let intron = (a.coords.rend + 1, b.coords.lend - 1);
-        score += introns.score(intron).unwrap_or(0.0);
+        let intron = exons[w[0]].coords.gap_to(&exons[w[1]].coords);
+        score += introns.score((intron.lend, intron.rend)).unwrap_or(0.0);
     }
     ConsensusGene {
         exon_indices,

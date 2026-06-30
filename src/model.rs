@@ -61,6 +61,37 @@ impl Coordset {
     pub fn is_empty(&self) -> bool {
         self.rend < self.lend
     }
+
+    /// The gap span to the **next** interval in a `lend`-sorted list:
+    /// `(self.rend + 1, next.lend - 1)`. This is the project's intron / inter-segment
+    /// convention (CLAUDE.md "Deliberate divergences") and the single source for it.
+    /// It is intentionally **not** normalized — abutting/overlapping intervals yield an
+    /// "empty" gap (`lend > rend`), exactly as the open-coded form did.
+    pub fn gap_to(&self, next: &Coordset) -> Coordset {
+        Coordset {
+            lend: self.rend + 1,
+            rend: next.lend - 1,
+        }
+    }
+
+    /// The intersection of two intervals, or `None` when they are disjoint (share no base).
+    pub fn intersect(&self, other: &Coordset) -> Option<Coordset> {
+        let lend = self.lend.max(other.lend);
+        let rend = self.rend.min(other.rend);
+        (lend <= rend).then_some(Coordset { lend, rend })
+    }
+
+    /// Number of shared bases with `other` (`0` when disjoint).
+    pub fn overlap_len(&self, other: &Coordset) -> i64 {
+        (self.rend.min(other.rend) - self.lend.max(other.lend) + 1).max(0)
+    }
+}
+
+/// The introns (gaps) of a `lend`-sorted interval list: `seg[i].gap_to(seg[i + 1])` for
+/// each adjacent pair. The single source for the intron convention shared by the
+/// assembler, alt-splice, ORF, and consensus paths.
+pub fn introns_between(segs: &[Coordset]) -> impl Iterator<Item = Coordset> + '_ {
+    segs.windows(2).map(|w| w[0].gap_to(&w[1]))
 }
 
 /// Transcribed / aligned orientation.
@@ -276,6 +307,57 @@ mod tests {
         let d = Coordset::new(150, 250); // genuine overlap
         assert!(a.overlaps_inclusive(&d));
         assert!(a.overlaps_strict(&d));
+    }
+
+    #[test]
+    fn gap_to_is_the_intron_convention() {
+        // adjacent exons → the gap between them, not normalized
+        let a = Coordset::new(100, 200);
+        let b = Coordset::new(301, 400);
+        assert_eq!(
+            a.gap_to(&b),
+            Coordset {
+                lend: 201,
+                rend: 300
+            }
+        );
+        // abutting exons → an "empty" (lend > rend) gap, preserved verbatim
+        let touching = Coordset::new(201, 300);
+        let g = a.gap_to(&touching);
+        assert_eq!((g.lend, g.rend), (201, 200));
+    }
+
+    #[test]
+    fn introns_between_walks_adjacent_pairs() {
+        let exons = vec![
+            Coordset::new(100, 200),
+            Coordset::new(301, 400),
+            Coordset::new(450, 500),
+        ];
+        let introns: Vec<_> = introns_between(&exons).collect();
+        assert_eq!(
+            introns,
+            vec![Coordset::new(201, 300), Coordset::new(401, 449)]
+        );
+    }
+
+    #[test]
+    fn intersect_and_overlap_len() {
+        let a = Coordset::new(100, 200);
+        assert_eq!(
+            a.intersect(&Coordset::new(150, 300)),
+            Some(Coordset::new(150, 200))
+        );
+        assert_eq!(a.overlap_len(&Coordset::new(150, 300)), 51);
+        // single shared base
+        assert_eq!(
+            a.intersect(&Coordset::new(200, 300)),
+            Some(Coordset::new(200, 200))
+        );
+        assert_eq!(a.overlap_len(&Coordset::new(200, 300)), 1);
+        // disjoint (adjacent, no shared base)
+        assert_eq!(a.intersect(&Coordset::new(201, 300)), None);
+        assert_eq!(a.overlap_len(&Coordset::new(201, 300)), 0);
     }
 
     #[test]

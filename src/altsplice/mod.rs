@@ -12,7 +12,7 @@ pub mod events;
 pub mod locus;
 
 use crate::assemble::ClusterAssembly;
-use crate::model::{Coordset, Strand};
+use crate::model::{Coordset, Strand, introns_between};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -32,13 +32,7 @@ pub struct Isoform {
 impl Isoform {
     /// Genomic introns: the gaps between consecutive (lend-sorted) exons.
     pub fn introns(&self) -> Vec<Coordset> {
-        self.exons
-            .windows(2)
-            .map(|w| Coordset {
-                lend: w[0].rend + 1,
-                rend: w[1].lend - 1,
-            })
-            .collect()
+        introns_between(&self.exons).collect()
     }
 
     fn plus_like(&self) -> bool {
