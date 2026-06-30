@@ -49,6 +49,9 @@ pub fn annotate(
     for (rank, &gi) in order.iter().enumerate() {
         let g = &genes[gi];
         let gene_id = format!("consensus.{}.g{}", g.contig, rank + 1);
+        // The consensus CDS introns, computed once per gene and reused by the
+        // truncation test and UTR salvage below.
+        let cds_introns = seg_introns(&g.cds);
 
         // An isoform earns its OWN mRNA only when it is a genuine alternative: it
         // introduces a novel splice junction (`coding_altered` AND not a mere terminal
@@ -67,7 +70,15 @@ pub fn annotate(
                 else {
                     continue;
                 };
-                if ann.coding_altered && !is_terminal_truncation(iso, g, ann) {
+                if ann.coding_altered
+                    && !is_terminal_truncation(
+                        &iso.exons,
+                        &iso_introns[idx],
+                        &g.cds,
+                        &cds_introns,
+                        ann,
+                    )
+                {
                     alt_isoforms.push((iso, ann));
                 }
             }
@@ -77,7 +88,7 @@ pub fn annotate(
         // its CDS — taking each end from whichever transcript extends it furthest, even a
         // transcript truncated at the other end (a 3'-truncated fragment still yields a
         // valid 5'UTR; a 5'-truncated one a valid 3'UTR).
-        let utrs = salvage_utrs(g, &asr.isoforms, &iso_introns);
+        let utrs = salvage_utrs(g, &asr.isoforms, &iso_introns, &cds_introns);
         let mut transcripts = vec![consensus_mrna(g, &gene_id, &utrs)];
         for (iso, ann) in alt_isoforms {
             let n = transcripts.len();
@@ -277,12 +288,16 @@ fn total_len(segs: &[Coordset]) -> i64 {
 /// start codon, so the start-anchored [`graft`] cannot see it — hence this separate
 /// scan over all isoforms). Only transcripts sharing every junction with the CDS
 /// contribute; genuine alternatives are excluded.
-fn salvage_utrs(g: &CalledGene, isoforms: &[Isoform], iso_introns: &[Vec<Coordset>]) -> Utrs {
+fn salvage_utrs(
+    g: &CalledGene,
+    isoforms: &[Isoform],
+    iso_introns: &[Vec<Coordset>],
+    cds_introns: &[Coordset],
+) -> Utrs {
     let mut out = Utrs::default();
     let (Some(cds0), Some(cdsl)) = (g.cds.first(), g.cds.last()) else {
         return out;
     };
-    let cds_introns = seg_introns(&g.cds);
     let minus = g.orient == Strand::Minus;
     // start/stop genomic = the 5'/3'-most CDS base for the strand.
     let (start_g, stop_g) = if minus {
@@ -303,7 +318,7 @@ fn salvage_utrs(g: &CalledGene, isoforms: &[Isoform], iso_introns: &[Vec<Coordse
         if il.rend < cds0.lend || i0.lend > cdsl.rend {
             continue; // no genomic overlap with the CDS
         }
-        if !shares_junctions(&iso.exons, &iso_introns[i], &g.cds, &cds_introns) {
+        if !shares_junctions(&iso.exons, &iso_introns[i], &g.cds, cds_introns) {
             continue;
         }
         if covers(&iso.exons, start_g) {
@@ -350,8 +365,14 @@ fn salvage_utrs(g: &CalledGene, isoforms: &[Isoform], iso_introns: &[Vec<Coordse
 /// by [`salvage_utrs`].) Mirrors PASA subsuming a contained alignment and EVM never
 /// minting a terminal exon at a truncation point; a retained intron / alternate
 /// donor-acceptor / exon skip perturbs the shared-span junctions and is kept.
-fn is_terminal_truncation(iso: &Isoform, g: &CalledGene, ann: &CodingAnnotation) -> bool {
-    ann.partial3 && shares_junctions(&iso.exons, &iso.introns(), &g.cds, &seg_introns(&g.cds))
+fn is_terminal_truncation(
+    iso_exons: &[Coordset],
+    iso_introns: &[Coordset],
+    cds: &[Coordset],
+    cds_introns: &[Coordset],
+    ann: &CodingAnnotation,
+) -> bool {
+    ann.partial3 && shares_junctions(iso_exons, iso_introns, cds, cds_introns)
 }
 
 /// A transcript isoform as an alternative mRNA, with the consensus CDS grafted on.

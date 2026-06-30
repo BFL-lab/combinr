@@ -8,6 +8,10 @@
 use crate::error::{CombinrError, Result};
 use crate::model::{Alignment, Segment, Strand};
 
+/// Line prefixes that mark non-data lines — `//` separators and the `input:`/`assembly`/
+/// `Individual` headers `pasa` emits — so its output can be fed straight back in.
+const SKIP_PREFIXES: &[&str] = &["//", "input:", "assembly", "Individual"];
+
 /// Parse all token-format alignments from `input`. Blank lines, `//` separators,
 /// and `input:`/`assembly:` lines (so `pasa` output can be fed back) are
 /// skipped. Like `pasa`, only lines containing a comma are treated as data.
@@ -15,12 +19,7 @@ pub fn parse_tokens(input: &str, source: &str) -> Result<Vec<Alignment>> {
     let mut out = Vec::new();
     for (i, raw) in input.lines().enumerate() {
         let line = raw.trim();
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with("input:")
-            || line.starts_with("assembly")
-            || line.starts_with("Individual")
-        {
+        if line.is_empty() || SKIP_PREFIXES.iter().any(|p| line.starts_with(p)) {
             continue;
         }
         if !line.contains(',') {

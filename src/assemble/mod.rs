@@ -227,29 +227,27 @@ impl Assembler {
         }
     }
 
+    /// Walk a `from`/`to` chain from `start`, marking each link's contained indices in
+    /// `tracker`. `next` picks the chain direction (`.from` for back, `.to` for forward).
+    fn trace_into(
+        &self,
+        start: usize,
+        tracker: &mut [bool],
+        next: impl Fn(&Lobject) -> Option<usize>,
+    ) {
+        let mut cur = Some(start);
+        while let Some(idx) = cur {
+            for bit in self.lobjects[idx].contained.ones() {
+                tracker[bit] = true;
+            }
+            cur = next(&self.lobjects[idx]);
+        }
+    }
+
     /// Walk the `from` chain from `start`, unioning contained indices; ascending.
     fn back_trace(&self, start: usize) -> Vec<usize> {
         let mut tracker = vec![false; self.n];
-        let mut cur = Some(start);
-        while let Some(idx) = cur {
-            for bit in self.lobjects[idx].contained.ones() {
-                tracker[bit] = true;
-            }
-            cur = self.lobjects[idx].from;
-        }
-        (0..self.n).filter(|&i| tracker[i]).collect()
-    }
-
-    /// Walk the `to` chain from `start`, unioning contained indices; ascending.
-    fn forward_trace(&self, start: usize) -> Vec<usize> {
-        let mut tracker = vec![false; self.n];
-        let mut cur = Some(start);
-        while let Some(idx) = cur {
-            for bit in self.lobjects[idx].contained.ones() {
-                tracker[bit] = true;
-            }
-            cur = self.lobjects[idx].to;
-        }
+        self.trace_into(start, &mut tracker, |o| o.from);
         (0..self.n).filter(|&i| tracker[i]).collect()
     }
 
@@ -272,12 +270,8 @@ impl Assembler {
     /// forward trace, ascending unique.
     fn nucleate(&self, index: usize) -> Vec<usize> {
         let mut tracker = vec![false; self.n];
-        for i in self.back_trace(index) {
-            tracker[i] = true;
-        }
-        for i in self.forward_trace(index) {
-            tracker[i] = true;
-        }
+        self.trace_into(index, &mut tracker, |o| o.from);
+        self.trace_into(index, &mut tracker, |o| o.to);
         (0..self.n).filter(|&i| tracker[i]).collect()
     }
 

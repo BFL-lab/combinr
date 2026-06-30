@@ -1,7 +1,7 @@
 //! Tab-separated alternative-splicing event report.
 
 use crate::altsplice::EventRecord;
-use crate::model::Strand;
+use crate::io::out_model::strand_char;
 use std::io::{self, Write};
 
 /// Write the alt-splice events as a TSV with a header row.
@@ -34,12 +34,4 @@ pub fn write_events<W: Write>(w: &mut W, events: &[EventRecord]) -> io::Result<(
         )?;
     }
     Ok(())
-}
-
-fn strand_char(s: Strand) -> char {
-    match s {
-        Strand::Plus => '+',
-        Strand::Minus => '-',
-        Strand::Unknown => '.',
-    }
 }

@@ -1,6 +1,7 @@
 //! GTF writer over the format-neutral [`OutGene`] model.
 
 use crate::io::out_model::{OutGene, OutTranscript, cds_phases, strand_char};
+use std::fmt::Write as _;
 use std::io::{self, Write};
 
 /// Write genes as GTF (gene_id / transcript_id attributes, `transcript`/`exon`/
@@ -82,7 +83,7 @@ fn gtf_attrs(
 ) -> String {
     let mut s = format!("gene_id \"{}\";", gtf_escape(gene_id));
     if let Some(tid) = transcript_id {
-        s.push_str(&format!(" transcript_id \"{}\";", gtf_escape(tid)));
+        let _ = write!(s, " transcript_id \"{}\";", gtf_escape(tid));
     }
     for (k, vals) in extra {
         let v = vals
@@ -90,7 +91,7 @@ fn gtf_attrs(
             .map(|x| gtf_escape(x))
             .collect::<Vec<_>>()
             .join(",");
-        s.push_str(&format!(" {k} \"{v}\";"));
+        let _ = write!(s, " {k} \"{v}\";");
     }
     s
 }

@@ -1,6 +1,7 @@
 //! GFF3 writer over the format-neutral [`OutGene`] model.
 
 use crate::io::out_model::{OutGene, OutTranscript, cds_phases, strand_char};
+use std::fmt::Write as _;
 use std::io::{self, Write};
 
 /// Write genes as GFF3.
@@ -31,7 +32,7 @@ fn write_transcript<W: Write>(w: &mut W, gene_id: &str, t: &OutTranscript) -> io
     let mut attrs = format!("ID={tid};Parent={gene_id}");
     for (k, vals) in &t.attrs {
         let v = vals.iter().map(|s| escape(s)).collect::<Vec<_>>().join(",");
-        attrs.push_str(&format!(";{k}={v}"));
+        let _ = write!(attrs, ";{k}={v}");
     }
     writeln!(
         w,

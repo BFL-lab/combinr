@@ -156,6 +156,17 @@ pub fn reconcile(
 ) -> ReconcileResult {
     let mut isoform_codings: Vec<Vec<CodingAnnotation>> = vec![Vec::new(); isoforms.len()];
 
+    // Bucket models by (contig, strand) once, so each locus filters only its candidate
+    // models by span overlap instead of re-scanning every model.
+    let mut models_by_key: HashMap<(&str, Strand), Vec<&CdsModel>> = HashMap::new();
+    for m in models {
+        models_by_key
+            .entry((m.contig.as_str(), m.strand))
+            .or_default()
+            .push(m);
+    }
+    let no_models: Vec<&CdsModel> = Vec::new();
+
     for locus in loci {
         let isos = &locus.isoform_indices;
         if isos.is_empty() {
@@ -176,13 +187,13 @@ pub fn reconcile(
             rend: locus_rend,
         };
 
-        let locus_models: Vec<&CdsModel> = models
+        let bucket = models_by_key
+            .get(&(locus.contig.as_str(), locus.strand))
+            .unwrap_or(&no_models);
+        let locus_models: Vec<&CdsModel> = bucket
             .iter()
-            .filter(|m| {
-                m.contig == locus.contig
-                    && m.strand == locus.strand
-                    && m.span().overlaps_inclusive(&locus_span)
-            })
+            .copied()
+            .filter(|m| m.span().overlaps_inclusive(&locus_span))
             .collect();
 
         for &iso_idx in isos {
