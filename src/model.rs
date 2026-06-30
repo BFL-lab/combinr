@@ -85,6 +85,16 @@ impl Coordset {
     pub fn overlap_len(&self, other: &Coordset) -> i64 {
         (self.rend.min(other.rend) - self.lend.max(other.lend) + 1).max(0)
     }
+
+    /// Reflect the interval about `axis`, mapping each genomic position `g` to
+    /// `axis - g + 1` — used to transpose between forward and reverse-complement
+    /// coordinates. The ends swap so the result stays `lend <= rend` when `axis >= rend`.
+    pub fn reflect(&self, axis: i64) -> Coordset {
+        Coordset {
+            lend: axis - self.rend + 1,
+            rend: axis - self.lend + 1,
+        }
+    }
 }
 
 /// The introns (gaps) of a `lend`-sorted interval list: `seg[i].gap_to(seg[i + 1])` for
@@ -358,6 +368,19 @@ mod tests {
         // disjoint (adjacent, no shared base)
         assert_eq!(a.intersect(&Coordset::new(201, 300)), None);
         assert_eq!(a.overlap_len(&Coordset::new(201, 300)), 0);
+    }
+
+    #[test]
+    fn reflect_is_its_own_inverse() {
+        let c = Coordset::new(50, 120);
+        let axis = 200;
+        let r = c.reflect(axis); // hi - rend + 1 .. hi - lend + 1 = 81 .. 151
+        assert_eq!(r, Coordset::new(81, 151));
+        assert_eq!(
+            r.reflect(axis),
+            c,
+            "reflecting twice about the same axis restores it"
+        );
     }
 
     #[test]

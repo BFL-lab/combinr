@@ -244,11 +244,12 @@ fn graft(
         (proj.cds_t_start, proj.cds_t_end, !proj.hit_stop, true)
     };
 
+    let (cds_segments, five_utr, three_utr) = st.cds_and_utrs(cds_t_start, cds_t_end);
     Some(CodingAnnotation {
         model_id: model.id.clone(),
-        cds_segments: st.genomic_segments_for_tspan(cds_t_start, cds_t_end),
-        five_utr: st.genomic_segments_for_tspan(0, cds_t_start),
-        three_utr: st.genomic_segments_for_tspan(cds_t_end, st.len()),
+        cds_segments,
+        five_utr,
+        three_utr,
         coding_altered,
         partial3,
     })

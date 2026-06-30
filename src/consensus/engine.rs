@@ -58,6 +58,16 @@ pub struct CalledGene {
     pub promoted: bool,
 }
 
+impl CalledGene {
+    /// Genomic span `(min lend, max rend)` over the gene's exons. Robust to ordering
+    /// (the exons are lend-sorted in practice, but this does not rely on it).
+    pub fn span(&self) -> (i64, i64) {
+        let lend = self.exons.iter().map(|c| c.lend).min().unwrap_or(0);
+        let rend = self.exons.iter().map(|c| c.rend).max().unwrap_or(0);
+        (lend, rend)
+    }
+}
+
 const MAX_RECURSION_DEPTH: usize = 32;
 
 /// Find consensus genes in `region` on both strands.
@@ -104,59 +114,22 @@ pub fn consensus_region(
         &mut fwd_genes,
         0,
     );
-    for (g, support) in &fwd_genes {
-        out.push(resolve(
-            g,
-            &fwd,
-            &region.contig,
-            Strand::Plus,
-            None,
-            *support,
-            genome,
-            &cand.code,
-        ));
-    }
+    resolve_all(
+        &fwd_genes,
+        &fwd,
+        &region.contig,
+        Strand::Plus,
+        None,
+        genome,
+        &cand.code,
+        &mut out,
+    );
 
     // ---- minus strand: reverse-complement the region, run forward, transpose back ----
-    if let Some(fwd_bytes) = genome.subseq(&region.contig, lo, hi) {
+    if let Some((rc_fasta, rc_region, rc_chains, rc_mask)) =
+        build_rc_region(&region, chains, mask, genome, lo, hi)
+    {
         let len = hi - lo + 1;
-        let rc_fasta = Fasta::from_seq("rc", reverse_complement(fwd_bytes));
-        let rc_local = |g: i64| hi - g + 1; // forward g in [lo,hi] -> RC-local in [1,len]
-
-        let mut rc_chains = Vec::new();
-        for &ci in &region.chain_indices {
-            let c = &chains[ci];
-            if c.orient != Strand::Minus {
-                continue;
-            }
-            let mut links: Vec<Coordset> = c
-                .links
-                .iter()
-                .map(|s| Coordset::new(rc_local(s.rend), rc_local(s.lend)))
-                .collect();
-            links.sort_by_key(|c| c.lend);
-            let span = Coordset::new(links.first().unwrap().lend, links.last().unwrap().rend);
-            rc_chains.push(EvidenceChain {
-                accession: c.accession.clone(),
-                ev_type: c.ev_type.clone(),
-                ev_class: c.ev_class,
-                weight: c.weight,
-                contig: "rc".into(),
-                orient: Strand::Plus,
-                span,
-                links,
-            });
-        }
-
-        let rc_region = ConsensusRegion {
-            contig: "rc".into(),
-            span: Coordset::new(1, len),
-            chain_indices: (0..rc_chains.len()).collect(),
-        };
-        let rc_mask: Vec<Coordset> = mask
-            .iter()
-            .map(|iv| Coordset::new(rc_local(iv.rend), rc_local(iv.lend)))
-            .collect();
         let rc = build_candidates(&rc_region, &rc_chains, &rc_fasta, cand, &rc_mask);
         let rc_base = score_all_exons(&rc.exons, &rc.vectors, weights);
         let mut rc_genes = Vec::new();
@@ -170,21 +143,91 @@ pub fn consensus_region(
             &mut rc_genes,
             0,
         );
-        for (g, support) in &rc_genes {
-            out.push(resolve(
-                g,
-                &rc,
-                &region.contig,
-                Strand::Minus,
-                Some(hi),
-                *support,
-                genome,
-                &cand.code,
-            ));
-        }
+        resolve_all(
+            &rc_genes,
+            &rc,
+            &region.contig,
+            Strand::Minus,
+            Some(hi),
+            genome,
+            &cand.code,
+            &mut out,
+        );
     }
 
     dedup_genes(out)
+}
+
+/// Reverse-complement transform for the minus strand: build the RC genome window over
+/// `[lo, hi]`, transpose every minus-strand chain and the repeat mask into RC-local
+/// coordinates (via [`Coordset::reflect`]), and return the RC region ready to run through
+/// the same forward machinery. `None` when the genome window is unavailable.
+fn build_rc_region(
+    region: &ConsensusRegion,
+    chains: &[EvidenceChain],
+    mask: &[Coordset],
+    genome: &Fasta,
+    lo: i64,
+    hi: i64,
+) -> Option<(Fasta, ConsensusRegion, Vec<EvidenceChain>, Vec<Coordset>)> {
+    let fwd_bytes = genome.subseq(&region.contig, lo, hi)?;
+    let len = hi - lo + 1;
+    let rc_fasta = Fasta::from_seq("rc", reverse_complement(fwd_bytes));
+
+    let mut rc_chains = Vec::new();
+    for &ci in &region.chain_indices {
+        let c = &chains[ci];
+        if c.orient != Strand::Minus {
+            continue;
+        }
+        let mut links: Vec<Coordset> = c.links.iter().map(|s| s.reflect(hi)).collect();
+        links.sort_by_key(|c| c.lend);
+        let span = Coordset::new(links.first().unwrap().lend, links.last().unwrap().rend);
+        rc_chains.push(EvidenceChain {
+            accession: c.accession.clone(),
+            ev_type: c.ev_type.clone(),
+            ev_class: c.ev_class,
+            weight: c.weight,
+            contig: "rc".into(),
+            orient: Strand::Plus,
+            span,
+            links,
+        });
+    }
+
+    let rc_region = ConsensusRegion {
+        contig: "rc".into(),
+        span: Coordset::new(1, len),
+        chain_indices: (0..rc_chains.len()).collect(),
+    };
+    let rc_mask: Vec<Coordset> = mask.iter().map(|iv| iv.reflect(hi)).collect();
+    Some((rc_fasta, rc_region, rc_chains, rc_mask))
+}
+
+/// Resolve a strand's trellis genes to forward coordinates and append them to `out`.
+#[allow(clippy::too_many_arguments)]
+fn resolve_all(
+    genes: &[(ConsensusGene, SupportFlags)],
+    rd: &RegionData,
+    contig: &str,
+    orient: Strand,
+    transpose_hi: Option<i64>,
+    genome: &Fasta,
+    code: &GeneticCode,
+    out: &mut Vec<CalledGene>,
+) {
+    for (g, support) in genes {
+        out.push(resolve(
+            g,
+            rd,
+            contig,
+            orient,
+            transpose_hi,
+            *support,
+            genome,
+            code,
+        ));
+    }
 }
 
 /// Drop genes with an identical (orientation, exon structure) — re-search can rediscover
@@ -219,7 +262,7 @@ fn resolve(
         .map(|&i| {
             let c = rd.exons[i].coords;
             match transpose_hi {
-                Some(hi) => Coordset::new(hi - c.rend + 1, hi - c.lend + 1),
+                Some(hi) => c.reflect(hi),
                 None => c,
             }
         })
@@ -238,12 +281,8 @@ fn resolve(
     let (cds, five_utr, three_utr, hit_stop) = match st.sequence(genome, contig) {
         Some(seq) => {
             let proj = st.project_orf(&seq, cds_t_start.min(seq.len()), code);
-            (
-                st.genomic_segments_for_tspan(proj.cds_t_start, proj.cds_t_end),
-                st.genomic_segments_for_tspan(0, proj.cds_t_start),
-                st.genomic_segments_for_tspan(proj.cds_t_end, st.len()),
-                proj.hit_stop,
-            )
+            let (cds, five_utr, three_utr) = st.cds_and_utrs(proj.cds_t_start, proj.cds_t_end);
+            (cds, five_utr, three_utr, proj.hit_stop)
         }
         None => (exons.clone(), Vec::new(), Vec::new(), has_stop),
     };

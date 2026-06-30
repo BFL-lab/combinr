@@ -36,10 +36,11 @@ pub fn promote_and_merge(
         if !is_both_partial(g) {
             return true;
         }
-        let (l, r) = (gene_lend(g), gene_rend(g));
-        !promoted
-            .iter()
-            .any(|p| p.contig == g.contig && gene_lend(p) <= r && gene_rend(p) >= l)
+        let (l, r) = g.span();
+        !promoted.iter().any(|p| {
+            let (pl, pr) = p.span();
+            p.contig == g.contig && pl <= r && pr >= l
+        })
     });
     genes.extend(promoted);
     genes
@@ -61,10 +62,8 @@ fn recover_transcript_loci(
         let (lend, rend) = locus_span(&asr.isoforms, locus);
         // Only a *real* (not both-partial) consensus gene counts as coverage.
         let covered = consensus_genes.iter().any(|g| {
-            g.contig == locus.contig
-                && !is_both_partial(g)
-                && gene_lend(g) <= rend
-                && gene_rend(g) >= lend
+            let (gl, gr) = g.span();
+            g.contig == locus.contig && !is_both_partial(g) && gl <= rend && gr >= lend
         });
         if covered {
             continue;
@@ -95,7 +94,7 @@ fn orf_gene(
     if coding_length < min_coding_length {
         return None;
     }
-    let cds = st.genomic_segments_for_tspan(orf.t_start, orf.t_end);
+    let (cds, five_utr, three_utr) = st.cds_and_utrs(orf.t_start, orf.t_end);
     if cds.is_empty() {
         return None;
     }
@@ -104,8 +103,8 @@ fn orf_gene(
         orient: iso.strand,
         exons: iso.exons.clone(),
         cds,
-        five_utr: st.genomic_segments_for_tspan(0, orf.t_start),
-        three_utr: st.genomic_segments_for_tspan(orf.t_end, st.len()),
+        five_utr,
+        three_utr,
         partial5: !orf.has_start,
         partial3: !orf.has_stop,
         score: coding_length as f64,
@@ -120,14 +119,6 @@ fn orf_gene(
 
 fn is_both_partial(g: &CalledGene) -> bool {
     g.partial5 && g.partial3
-}
-
-fn gene_lend(g: &CalledGene) -> i64 {
-    g.exons.first().map(|c| c.lend).unwrap_or(i64::MAX)
-}
-
-fn gene_rend(g: &CalledGene) -> i64 {
-    g.exons.last().map(|c| c.rend).unwrap_or(i64::MIN)
 }
 
 fn locus_span(isoforms: &[Isoform], locus: &Locus) -> (i64, i64) {

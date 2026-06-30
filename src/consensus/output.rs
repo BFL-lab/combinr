@@ -5,23 +5,52 @@
 use crate::consensus::engine::CalledGene;
 use crate::io::out_model::{OutGene, OutTranscript};
 
+/// The `score_ratio` attribute string: `NA` for a promoted transcript-ORF gene (no
+/// consensus noncoding baseline to compare against), `{:.2}` for a finite ratio, else
+/// `inf`. Shared by the default and `--alt-splice` consensus renderers.
+pub(crate) fn format_ratio(g: &CalledGene) -> String {
+    if g.promoted {
+        "NA".to_string()
+    } else if g.support.score_ratio.is_finite() {
+        format!("{:.2}", g.support.score_ratio)
+    } else {
+        "inf".to_string()
+    }
+}
+
+/// The six consensus attributes shared by both renderers, in their load-bearing GFF order:
+/// `score, score_ratio, coding_length, low_support, partial5, partial3`. Callers prepend
+/// the `support` tag (and the `--alt-splice` path appends `sources`/`contains`) themselves,
+/// so the two modes stay intentionally — not accidentally — in sync.
+pub(crate) fn consensus_core_attrs(g: &CalledGene) -> Vec<(String, Vec<String>)> {
+    vec![
+        ("score".into(), vec![format!("{:.1}", g.score)]),
+        ("score_ratio".into(), vec![format_ratio(g)]),
+        (
+            "coding_length".into(),
+            vec![g.support.coding_length.to_string()],
+        ),
+        (
+            "low_support".into(),
+            vec![g.support.low_support.to_string()],
+        ),
+        ("partial5".into(), vec![g.partial5.to_string()]),
+        ("partial3".into(), vec![g.partial3.to_string()]),
+    ]
+}
+
 /// Convert called genes to output genes, sorted deterministically by position.
 pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
     let mut order: Vec<&CalledGene> = genes.iter().collect();
     order.sort_by(|a, b| {
-        let ak = (
-            a.contig.as_str(),
-            gene_lend(a),
-            gene_rend(a),
-            a.orient.to_char(),
-        );
-        let bk = (
+        let (al, ar) = a.span();
+        let (bl, br) = b.span();
+        (a.contig.as_str(), al, ar, a.orient.to_char()).cmp(&(
             b.contig.as_str(),
-            gene_lend(b),
-            gene_rend(b),
+            bl,
+            br,
             b.orient.to_char(),
-        );
-        ak.cmp(&bk)
+        ))
     });
 
     order
@@ -29,31 +58,8 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
         .enumerate()
         .map(|(i, g)| {
             let gene_id = format!("consensus.{}.g{}", g.contig, i + 1);
-            let lend = gene_lend(g);
-            let rend = gene_rend(g);
-            // Promoted transcript-ORF genes have no consensus noncoding baseline, so the
-            // ratio is reported as NA rather than the placeholder infinity.
-            let ratio = if g.promoted {
-                "NA".to_string()
-            } else if g.support.score_ratio.is_finite() {
-                format!("{:.2}", g.support.score_ratio)
-            } else {
-                "inf".to_string()
-            };
-            let mut attrs = vec![
-                ("score".into(), vec![format!("{:.1}", g.score)]),
-                ("score_ratio".into(), vec![ratio]),
-                (
-                    "coding_length".into(),
-                    vec![g.support.coding_length.to_string()],
-                ),
-                (
-                    "low_support".into(),
-                    vec![g.support.low_support.to_string()],
-                ),
-                ("partial5".into(), vec![g.partial5.to_string()]),
-                ("partial3".into(), vec![g.partial3.to_string()]),
-            ];
+            let (lend, rend) = g.span();
+            let mut attrs = consensus_core_attrs(g);
             // Tag only promoted genes, so default consensus output is unchanged.
             if g.promoted {
                 attrs.insert(0, ("support".into(), vec!["transcript_orf".into()]));
@@ -77,12 +83,4 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
             }
         })
         .collect()
-}
-
-fn gene_lend(g: &CalledGene) -> i64 {
-    g.exons.iter().map(|c| c.lend).min().unwrap_or(0)
-}
-
-fn gene_rend(g: &CalledGene) -> i64 {
-    g.exons.iter().map(|c| c.rend).max().unwrap_or(0)
 }

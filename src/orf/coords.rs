@@ -130,6 +130,22 @@ impl SplicedTranscript {
         out
     }
 
+    /// The CDS and flanking 5'/3' UTR genomic segments for the coding span
+    /// `[cds_t_start, cds_t_end)` in transcript coordinates: `(cds, five_utr, three_utr)`,
+    /// the UTRs being the transcript material before the start and after the stop. The
+    /// single source for the CDS/UTR projection shared by `graft`, the engine, and promote.
+    pub fn cds_and_utrs(
+        &self,
+        cds_t_start: usize,
+        cds_t_end: usize,
+    ) -> (Vec<Coordset>, Vec<Coordset>, Vec<Coordset>) {
+        (
+            self.genomic_segments_for_tspan(cds_t_start, cds_t_end),
+            self.genomic_segments_for_tspan(0, cds_t_start),
+            self.genomic_segments_for_tspan(cds_t_end, self.len()),
+        )
+    }
+
     /// Project an ORF starting at transcript offset `cds_t_start` (the 5' base of
     /// the start codon), translating `seq` until the first in-frame stop under
     /// `code`. With no stop, the CDS runs to the last complete codon (3'-partial).

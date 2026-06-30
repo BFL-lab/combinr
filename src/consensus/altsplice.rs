@@ -124,33 +124,14 @@ fn to_cds_model(g: &CalledGene, id: String) -> Option<CdsModel> {
 /// exon structure is extended with the salvaged 5'/3' UTR segments, and the donor
 /// transcripts' provenance is recorded so the UTR support is traceable.
 fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
-    let ratio = if g.promoted {
-        "NA".to_string()
-    } else if g.support.score_ratio.is_finite() {
-        format!("{:.2}", g.support.score_ratio)
-    } else {
-        "inf".to_string()
-    };
+    // `support` first (always present here), then the six shared consensus attributes.
     let support = if g.promoted {
         "transcript_orf"
     } else {
         "consensus"
     };
-    let mut attrs = vec![
-        ("support".into(), vec![support.to_string()]),
-        ("score".into(), vec![format!("{:.1}", g.score)]),
-        ("score_ratio".into(), vec![ratio]),
-        (
-            "coding_length".into(),
-            vec![g.support.coding_length.to_string()],
-        ),
-        (
-            "low_support".into(),
-            vec![g.support.low_support.to_string()],
-        ),
-        ("partial5".into(), vec![g.partial5.to_string()]),
-        ("partial3".into(), vec![g.partial3.to_string()]),
-    ];
+    let mut attrs = vec![("support".into(), vec![support.to_string()])];
+    attrs.extend(crate::consensus::output::consensus_core_attrs(g));
 
     // Adopt the salvaged UTRs only when the base consensus has none of its own; extend
     // the CDS-only exon structure with the UTR segments (merging the UTR that abuts a
@@ -403,12 +384,8 @@ fn iso_mrna(iso: &Isoform, ann: &CodingAnnotation, gene_id: &str, n: usize) -> O
 }
 
 fn gkey(g: &CalledGene) -> (String, i64, i64, char) {
-    (
-        g.contig.clone(),
-        g.exons.first().map(|c| c.lend).unwrap_or(0),
-        g.exons.last().map(|c| c.rend).unwrap_or(0),
-        g.orient.to_char(),
-    )
+    let (lend, rend) = g.span();
+    (g.contig.clone(), lend, rend, g.orient.to_char())
 }
 
 fn span_of(transcripts: &[OutTranscript]) -> (i64, i64) {
