@@ -5,6 +5,7 @@
 
 pub mod bam;
 pub mod fasta;
+pub(crate) mod gff;
 pub mod gff3;
 pub mod gtf;
 pub mod out_model;
@@ -62,6 +63,23 @@ fn basename(path: &Path) -> String {
         .to_string()
 }
 
+/// The first whitespace-delimited token of `s` (a Target/FASTA-header accession), or `""`.
+pub(crate) fn first_token(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or("")
+}
+
+/// Sort alignments into the parsers' canonical, deterministic order: `(contig, leftmost
+/// coordinate, accession)`. Shared by the GFF3/GTF/BAM readers.
+pub(crate) fn sort_alignments_canonical(aligns: &mut [Alignment]) {
+    aligns.sort_by(|a, b| {
+        (a.contig.as_str(), a.coords.lend, a.acc.as_str()).cmp(&(
+            b.contig.as_str(),
+            b.coords.lend,
+            b.acc.as_str(),
+        ))
+    });
+}
+
 /// `true` if `path` is a BAM file: a `.bam` extension (case-insensitive) backed
 /// by the BGZF/gzip magic prefix `1f 8b`. A `.bam` file lacking the magic is a
 /// parse error (so a mislabeled text file fails clearly instead of being read as
@@ -104,14 +122,9 @@ pub fn detect_format(path: &Path, text: &str) -> Format {
 /// Content sniff: GTF attributes look like `key "value";`; GFF3 like `key=value`.
 fn sniff_format(text: &str) -> Format {
     for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let Some(cols) = gff::columns(line) else {
             continue;
-        }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 {
-            continue;
-        }
+        };
         let attrs = cols[8];
         if attrs.contains('=')
             && (attrs.contains("ID=") || attrs.contains("Parent=") || attrs.contains("Target="))

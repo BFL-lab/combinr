@@ -5,8 +5,9 @@
 //! validation); a `.` score column becomes 100. cDNA coordinates are synthesized
 //! from exon lengths in transcription order.
 
-use super::{RawSegment, build_alignment};
-use crate::error::{CombinrError, Result};
+use super::gff::{self, AttrSep};
+use super::{RawSegment, build_alignment, sort_alignments_canonical};
+use crate::error::Result;
 use crate::model::{Alignment, Coordset, Strand};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,46 +25,31 @@ pub fn parse(text: &str, source: &str) -> Result<Vec<Alignment>> {
     let mut groups: HashMap<String, Group> = HashMap::new();
 
     for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim_end();
-        if line.is_empty() || line.starts_with('#') {
+        let Some(rec) = gff::record(raw, &source, lineno + 1)? else {
+            continue;
+        };
+        if rec.ftype != "exon" {
             continue;
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 {
-            continue;
-        }
-        if cols[2] != "exon" {
-            continue;
-        }
-        let attrs = parse_attrs(cols[8]);
+        let attrs = gff::parse_attrs(rec.attrs, AttrSep::Space);
         let Some(tid) = attrs.get("transcript_id") else {
             continue;
         };
-
-        let err = |msg: &str| CombinrError::Parse {
-            file: source.to_string(),
-            line: lineno + 1,
-            msg: msg.to_string(),
-        };
-        let lend: i64 = cols[3].parse().map_err(|_| err("bad start coordinate"))?;
-        let rend: i64 = cols[4].parse().map_err(|_| err("bad end coordinate"))?;
-        let per_id = parse_score(cols[5]);
-        let strand = Strand::from_char(cols[6].chars().next().unwrap_or('.'));
 
         let key = tid.clone();
         let entry = groups.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
             Group {
-                contig: cols[0].to_string(),
-                strand,
+                contig: rec.contig.to_string(),
+                strand: rec.strand,
                 gene_id: attrs.get("gene_id").cloned(),
                 segs: Vec::new(),
             }
         });
         entry.segs.push(RawSegment {
-            genomic: Coordset::new(lend, rend),
+            genomic: Coordset::new(rec.lend, rec.rend),
             mcoords: None,
-            per_id,
+            per_id: rec.score,
         });
     }
 
@@ -74,37 +60,8 @@ pub fn parse(text: &str, source: &str) -> Result<Vec<Alignment>> {
             key, g.contig, g.strand, g.gene_id, g.segs, &source,
         ));
     }
-    out.sort_by(|a, b| {
-        (a.contig.as_str(), a.coords.lend, a.acc.as_str()).cmp(&(
-            b.contig.as_str(),
-            b.coords.lend,
-            b.acc.as_str(),
-        ))
-    });
+    sort_alignments_canonical(&mut out);
     Ok(out)
-}
-
-/// Parse `key "value"; key "value";` GTF attributes.
-fn parse_attrs(s: &str) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    for part in s.split(';') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = part.split_once(char::is_whitespace) {
-            m.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
-        }
-    }
-    m
-}
-
-fn parse_score(s: &str) -> Option<f64> {
-    if s == "." {
-        Some(100.0)
-    } else {
-        s.parse().ok()
-    }
 }
 
 #[cfg(test)]

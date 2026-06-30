@@ -24,7 +24,7 @@ pub use translate::GeneticCode;
 use crate::altsplice::{EventRecord, Isoform, Locus, RegionClass};
 use crate::error::{CombinrError, Result};
 use crate::io::fasta::Fasta;
-use crate::io::gff3::parse_attrs;
+use crate::io::gff::{self, AttrSep};
 use crate::model::{Coordset, Strand, introns_between};
 use coords::SplicedTranscript;
 use std::collections::HashMap;
@@ -98,37 +98,28 @@ pub fn parse_cds_models(path: &Path) -> Result<Vec<CdsModel>> {
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, Acc> = HashMap::new();
 
+    let file = path.display().to_string();
     for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim_end();
-        if line.is_empty() || line.starts_with('#') {
+        let Some(rec) = gff::record(raw, &file, lineno + 1)? else {
+            continue;
+        };
+        if rec.ftype != "CDS" {
             continue;
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 || cols[2] != "CDS" {
-            continue;
-        }
-        let attrs = parse_attrs(cols[8]);
+        let attrs = gff::parse_attrs(rec.attrs, AttrSep::Eq);
         let parent = match attrs.get("Parent").or_else(|| attrs.get("ID")) {
             Some(p) => p.clone(),
             None => continue,
         };
-        let err = |msg: &str| CombinrError::Parse {
-            file: path.display().to_string(),
-            line: lineno + 1,
-            msg: msg.to_string(),
-        };
-        let lend: i64 = cols[3].parse().map_err(|_| err("bad CDS start"))?;
-        let rend: i64 = cols[4].parse().map_err(|_| err("bad CDS end"))?;
-        let strand = Strand::from_char(cols[6].chars().next().unwrap_or('.'));
         let acc = groups.entry(parent.clone()).or_insert_with(|| {
             order.push(parent.clone());
             Acc {
-                contig: cols[0].to_string(),
-                strand,
+                contig: rec.contig.to_string(),
+                strand: rec.strand,
                 segs: Vec::new(),
             }
         });
-        acc.segs.push(Coordset::new(lend, rend));
+        acc.segs.push(Coordset::new(rec.lend, rec.rend));
     }
 
     let mut models = Vec::with_capacity(order.len());

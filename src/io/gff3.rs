@@ -11,8 +11,9 @@
 //! (matching PASA's assumption). Strand is taken verbatim — no splice-site
 //! validation (see `avoid-canonical-splice-bias`).
 
-use super::{RawSegment, build_alignment};
-use crate::error::{CombinrError, Result};
+use super::gff::{self, AttrSep};
+use super::{RawSegment, build_alignment, first_token, sort_alignments_canonical};
+use crate::error::Result;
 use crate::model::{Alignment, Coordset, Strand};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,39 +34,27 @@ pub fn parse(text: &str, source: &str) -> Result<Vec<Alignment>> {
     let mut groups: HashMap<String, Group> = HashMap::new();
 
     for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim_end();
-        if line.is_empty() || line.starts_with('#') {
+        let Some(rec) = gff::record(raw, &source, lineno + 1)? else {
             continue;
-        }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 {
-            continue;
-        }
-        let attrs = parse_attrs(cols[8]);
-        let ftype = cols[2];
+        };
+        let attrs = gff::parse_attrs(rec.attrs, AttrSep::Eq);
 
         // Track mRNA -> gene for later gene_id assignment.
-        if matches!(ftype, "mRNA" | "transcript") {
+        if matches!(rec.ftype, "mRNA" | "transcript") {
             if let (Some(id), Some(parent)) = (attrs.get("ID"), attrs.get("Parent")) {
                 mrna_to_gene.insert(id.clone(), parent.clone());
             }
             continue;
         }
 
-        let err = |msg: &str| CombinrError::Parse {
-            file: source.to_string(),
-            line: lineno + 1,
-            msg: msg.to_string(),
-        };
-
         let (key, mcoords): (String, Option<Coordset>) = if let Some(target) = attrs.get("Target") {
             // cDNA_match form: group by ID (unique alignment id), cDNA from Target.
             let key = attrs
                 .get("ID")
                 .cloned()
-                .unwrap_or_else(|| target_acc(target));
+                .unwrap_or_else(|| first_token(target).to_string());
             (key, parse_target_coords(target))
-        } else if ftype == "exon" {
+        } else if rec.ftype == "exon" {
             // gene-model form: group by Parent (the mRNA id).
             let Some(parent) = attrs.get("Parent") else {
                 continue;
@@ -75,23 +64,18 @@ pub fn parse(text: &str, source: &str) -> Result<Vec<Alignment>> {
             continue; // gene/CDS/region/etc.
         };
 
-        let lend: i64 = cols[3].parse().map_err(|_| err("bad start coordinate"))?;
-        let rend: i64 = cols[4].parse().map_err(|_| err("bad end coordinate"))?;
-        let per_id = parse_score(cols[5]);
-        let strand = Strand::from_char(cols[6].chars().next().unwrap_or('.'));
-
         let entry = groups.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
             Group {
-                contig: cols[0].to_string(),
-                strand,
+                contig: rec.contig.to_string(),
+                strand: rec.strand,
                 segs: Vec::new(),
             }
         });
         entry.segs.push(RawSegment {
-            genomic: Coordset::new(lend, rend),
+            genomic: Coordset::new(rec.lend, rec.rend),
             mcoords,
-            per_id,
+            per_id: rec.score,
         });
     }
 
@@ -104,35 +88,8 @@ pub fn parse(text: &str, source: &str) -> Result<Vec<Alignment>> {
             key, g.contig, g.strand, gene_id, g.segs, &source,
         ));
     }
-    // deterministic order
-    out.sort_by(|a, b| {
-        (a.contig.as_str(), a.coords.lend, a.acc.as_str()).cmp(&(
-            b.contig.as_str(),
-            b.coords.lend,
-            b.acc.as_str(),
-        ))
-    });
+    sort_alignments_canonical(&mut out);
     Ok(out)
-}
-
-/// Parse `key=value;key=value` GFF3 attributes.
-pub(crate) fn parse_attrs(s: &str) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    for part in s.split(';') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = part.split_once('=') {
-            m.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
-        }
-    }
-    m
-}
-
-/// First whitespace token of a `Target` value (the cDNA accession).
-fn target_acc(target: &str) -> String {
-    target.split_whitespace().next().unwrap_or("").to_string()
 }
 
 /// Extract the two cDNA coordinates from `Target=acc lend rend [strand]`.
@@ -142,15 +99,6 @@ fn parse_target_coords(target: &str) -> Option<Coordset> {
     let l: i64 = it.next()?.parse().ok()?;
     let r: i64 = it.next()?.parse().ok()?;
     Some(Coordset::new(l, r))
-}
-
-/// Score column → percent identity; `.` becomes 100 (PASA assumption).
-fn parse_score(s: &str) -> Option<f64> {
-    if s == "." {
-        Some(100.0)
-    } else {
-        s.parse().ok()
-    }
 }
 
 #[cfg(test)]

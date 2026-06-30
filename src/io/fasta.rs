@@ -23,7 +23,7 @@ impl Fasta {
         let mut current: Option<String> = None;
         for line in text.lines() {
             if let Some(header) = line.strip_prefix('>') {
-                let name = header.split_whitespace().next().unwrap_or("").to_string();
+                let name = super::first_token(header).to_string();
                 current = Some(name.clone());
                 seqs.entry(name).or_default();
             } else if let Some(name) = &current {

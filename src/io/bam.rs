@@ -30,7 +30,7 @@ use noodles::bam;
 use noodles::sam::alignment::record::cigar::op::Kind;
 use noodles::sam::alignment::record::data::field::Value;
 
-use super::{RawSegment, build_alignment};
+use super::{RawSegment, build_alignment, sort_alignments_canonical};
 use crate::error::{CombinrError, Result};
 use crate::model::{Alignment, Coordset, Strand};
 
@@ -114,13 +114,7 @@ pub fn parse(path: &Path, source: &str) -> Result<Vec<Alignment>> {
     }
 
     // Deterministic order, matching the text parsers: (contig, leftmost, acc).
-    out.sort_by(|a, b| {
-        (a.contig.as_str(), a.coords.lend, a.acc.as_str()).cmp(&(
-            b.contig.as_str(),
-            b.coords.lend,
-            b.acc.as_str(),
-        ))
-    });
+    sort_alignments_canonical(&mut out);
     Ok(out)
 }
 

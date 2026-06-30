@@ -13,7 +13,8 @@
 
 use crate::consensus::weights::{EvClass, Weights};
 use crate::error::{CombinrError, Result};
-use crate::io::gff3::parse_attrs;
+use crate::io::first_token;
+use crate::io::gff::{self, AttrSep};
 use crate::model::{Coordset, Strand};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -148,21 +149,14 @@ fn parse_chains(text: &str, file: &str, kind: EvidenceKind) -> Result<Vec<RawCha
     let mut groups: HashMap<String, RawChain> = HashMap::new();
 
     for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim_end();
-        if line.is_empty() || line.starts_with('#') {
+        let Some(rec) = gff::record(raw, file, lineno + 1)? else {
             continue;
-        }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 9 {
-            continue;
-        }
-        let ev_type = cols[1]; // GFF column 2 = source
-        let ftype = cols[2];
-        let attrs = parse_attrs(cols[8]);
+        };
+        let attrs = gff::parse_attrs(rec.attrs, AttrSep::Eq);
 
         let key = match kind {
             EvidenceKind::Prediction => {
-                if ftype != "CDS" {
+                if rec.ftype != "CDS" {
                     continue;
                 }
                 match attrs.get("Parent").or_else(|| attrs.get("ID")) {
@@ -177,30 +171,21 @@ fn parse_chains(text: &str, file: &str, kind: EvidenceKind) -> Result<Vec<RawCha
                 attrs
                     .get("ID")
                     .cloned()
-                    .unwrap_or_else(|| target.split_whitespace().next().unwrap_or("").to_string())
+                    .unwrap_or_else(|| first_token(target).to_string())
             }
         };
-
-        let err = |msg: &str| CombinrError::Parse {
-            file: file.to_string(),
-            line: lineno + 1,
-            msg: msg.to_string(),
-        };
-        let lend: i64 = cols[3].parse().map_err(|_| err("bad start coordinate"))?;
-        let rend: i64 = cols[4].parse().map_err(|_| err("bad end coordinate"))?;
-        let strand = Strand::from_char(cols[6].chars().next().unwrap_or('.'));
 
         let entry = groups.entry(key.clone()).or_insert_with(|| {
             order.push(key.clone());
             RawChain {
                 accession: key.clone(),
-                ev_type: ev_type.to_string(),
-                contig: cols[0].to_string(),
-                strand,
+                ev_type: rec.source.to_string(), // GFF column 2 = source
+                contig: rec.contig.to_string(),
+                strand: rec.strand,
                 segs: Vec::new(),
             }
         });
-        entry.segs.push(Coordset::new(lend, rend));
+        entry.segs.push(Coordset::new(rec.lend, rec.rend));
     }
 
     let mut out = Vec::with_capacity(order.len());
