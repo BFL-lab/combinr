@@ -18,6 +18,26 @@ use crate::orf::{GeneticCode, ReconcileResult, parse_cds_models, reconcile};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
+/// PASA pairwise-compatibility fuzz default (bp) used when the consensus path
+/// internally assembles its transcript alignments. Mirrors the CLI default.
+pub const DEFAULT_FUZZLENGTH: i64 = 20;
+/// EVM `terminal_intergenic_re_search` default (bp): minimum tail size to re-search.
+pub const DEFAULT_RESEARCH_SIZE: i64 = 10_000;
+/// Minimum consensus coding length (bp) below which a gene is flagged low-support.
+pub const DEFAULT_MIN_CODING_LENGTH: i64 = 150;
+/// Scaling applied to intergenic scores (EVM `INTERGENIC_SCORE_ADJUST_FACTOR`).
+pub const DEFAULT_INTERGENIC_ADJUST: f64 = 1.0;
+
+/// Resolve an NCBI genetic-code id, mapping the table-validation message into a
+/// [`CombinrError::Parse`]. Single source for the consensus entry points.
+pub fn parse_genetic_code(id: u32) -> Result<GeneticCode> {
+    GeneticCode::from_ncbi_id(id).map_err(|msg| CombinrError::Parse {
+        file: "genetic-code".into(),
+        line: 0,
+        msg,
+    })
+}
+
 /// Load alignments from `paths`, apply optional quality filters, cluster
 /// genome-wide, and assemble each cluster (in parallel) into a non-redundant
 /// set. Provenance from all sources is preserved.
@@ -113,9 +133,21 @@ pub struct ConsensusConfig {
     pub stringent_overlap: f64,
 }
 
-/// Build consensus gene models: parse weights, ingest weighted evidence, cluster into
-/// per-contig regions, and run the both-strand trellis on each region in parallel.
-pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
+/// Everything `consensus_inner` builds once, shared by both consensus entry points so
+/// the `--alt-splice` path never re-loads the genome, re-parses the code, or re-assembles
+/// the transcripts that the core run already produced.
+struct ConsensusInner {
+    genes: Vec<CalledGene>,
+    genome: Fasta,
+    code: GeneticCode,
+    /// The transcript-assembly result, present iff `--promote-transcript-orfs` ran it.
+    asr: Option<AltSpliceResult>,
+}
+
+/// Core consensus run: parse weights, ingest weighted evidence, cluster into per-contig
+/// regions, run the both-strand trellis on each region in parallel, and (opt-in) promote
+/// transcript-only loci via de-novo ORF — returning the genome/code/assembly it loaded.
+fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
     let weights = Weights::parse_file(&cfg.weights)?;
     let chains = load_evidence(
         &cfg.gene_predictions,
@@ -124,11 +156,7 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
         &weights,
     )?;
     let genome = Fasta::load(&cfg.genome)?;
-    let code = GeneticCode::from_ncbi_id(cfg.genetic_code).map_err(|msg| CombinrError::Parse {
-        file: "genetic-code".into(),
-        line: 0,
-        msg,
-    })?;
+    let code = parse_genetic_code(cfg.genetic_code)?;
     let cand = CandidateParams {
         min_intron_length: cfg.min_intron_length,
         code,
@@ -139,7 +167,7 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
     let filt = FilterParams {
         min_score_ratio: cfg.min_score_ratio,
         min_coding_length: cfg.min_coding_length,
-        intergenic_adjust: 1.0,
+        intergenic_adjust: DEFAULT_INTERGENIC_ADJUST,
         strict: cfg.strict,
     };
     let eng = EngineParams {
@@ -147,7 +175,7 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
         research_size: cfg.research_size,
         research_intergenic: cfg.research_intergenic,
         search_long_introns: cfg.search_long_introns,
-        intergenic_adjust: 1.0,
+        intergenic_adjust: DEFAULT_INTERGENIC_ADJUST,
     };
 
     let mask = match &cfg.repeats {
@@ -178,10 +206,10 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
 
     // Recover transcript-only loci via de-novo ORF (opt-in). Assemble the transcript
     // alignments (the PASA path) and promote loci with no overlapping consensus gene.
-    if cfg.promote_transcript_orfs && !cfg.transcript_alignments.is_empty() {
+    let asr = if cfg.promote_transcript_orfs && !cfg.transcript_alignments.is_empty() {
         let asr = analyze_sources(
             &cfg.transcript_alignments,
-            20, // PASA fuzz default
+            DEFAULT_FUZZLENGTH,
             cfg.stringent_overlap,
             &Filters::none(),
         )?;
@@ -192,27 +220,46 @@ pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
             &code,
             cfg.min_coding_length,
         );
-    }
-    Ok(genes)
+        Some(asr)
+    } else {
+        None
+    };
+
+    Ok(ConsensusInner {
+        genes,
+        genome,
+        code,
+        asr,
+    })
+}
+
+/// Build consensus gene models: parse weights, ingest weighted evidence, cluster into
+/// per-contig regions, and run the both-strand trellis on each region in parallel.
+pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
+    Ok(consensus_inner(cfg)?.genes)
 }
 
 /// `consensus --alt-splice`: build the consensus genes, then attach each locus's
 /// alternative transcript isoforms as extra mRNAs (CDS grafted from the consensus). Returns
 /// the output genes and the region-tagged alt-splice events.
 pub fn consensus_with_isoforms(cfg: &ConsensusConfig) -> Result<(Vec<OutGene>, Vec<EventRecord>)> {
-    let genes = consensus_sources(cfg)?;
-    let genome = Fasta::load(&cfg.genome)?;
-    let code = GeneticCode::from_ncbi_id(cfg.genetic_code).map_err(|msg| CombinrError::Parse {
-        file: "genetic-code".into(),
-        line: 0,
-        msg,
-    })?;
-    let asr = analyze_sources(
-        &cfg.transcript_alignments,
-        20, // PASA fuzz default
-        cfg.stringent_overlap,
-        &Filters::none(),
-    )?;
+    let ConsensusInner {
+        genes,
+        genome,
+        code,
+        asr,
+    } = consensus_inner(cfg)?;
+    // Reuse the transcript assembly when `--promote` already produced it; otherwise build
+    // it now (identical args, so the output is unchanged either way).
+    let asr = match asr {
+        Some(asr) => asr,
+        None => analyze_sources(
+            &cfg.transcript_alignments,
+            DEFAULT_FUZZLENGTH,
+            cfg.stringent_overlap,
+            &Filters::none(),
+        )?,
+    };
     Ok(crate::consensus::altsplice::annotate(
         &genes, asr, &genome, &code,
     ))

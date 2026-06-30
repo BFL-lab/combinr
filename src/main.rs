@@ -12,8 +12,11 @@ use combinr::assemble::Assembler;
 use combinr::filter::Filters;
 use combinr::io::out_model::{OutGene, from_annotated_loci, from_assemblies, from_loci};
 use combinr::io::{writer_events, writer_gff3, writer_gtf};
-use combinr::orf::GeneticCode;
-use combinr::pipeline::{analyze_sources, assemble_sources, reconcile_sources};
+use combinr::pipeline::{
+    ConsensusConfig, DEFAULT_MIN_CODING_LENGTH, DEFAULT_RESEARCH_SIZE, analyze_sources,
+    assemble_sources, consensus_sources, consensus_with_isoforms, parse_genetic_code,
+    reconcile_sources,
+};
 use combinr::token::parse_tokens;
 
 fn main() -> Result<()> {
@@ -56,8 +59,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
         // CDS/UTR reconcile: graft an external prediction's CDS onto the isoforms.
         // Supersedes --alt-splice; the reconcile path emits region-tagged events too.
         (Some(gene_pred), Some(genome)) => {
-            let code =
-                GeneticCode::from_ncbi_id(a.pipeline.genetic_code).map_err(anyhow::Error::msg)?;
+            let code = parse_genetic_code(a.pipeline.genetic_code)?;
             let (isoforms, loci, recon) = reconcile_sources(
                 &a.inputs.input,
                 &gene_pred,
@@ -120,13 +122,42 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
     }
 }
 
+impl ConsensusArgs {
+    /// Lower the parsed CLI args into the library's [`ConsensusConfig`]. The two
+    /// non-CLI knobs come from named defaults rather than inline literals.
+    fn into_config(self) -> ConsensusConfig {
+        ConsensusConfig {
+            weights: self.inputs.weights,
+            gene_predictions: self.inputs.gene_predictions,
+            protein_alignments: self.inputs.protein_alignments,
+            transcript_alignments: self.inputs.transcript_alignments,
+            genome: self.inputs.genome,
+            repeats: self.inputs.repeats,
+            genetic_code: self.tuning.genetic_code,
+            flank: self.behavior.flank,
+            strict: self.behavior.strict,
+            max_prev_exons: self.tuning.max_prev_exons,
+            min_score_ratio: self.tuning.min_score_ratio,
+            min_intron_length: self.tuning.min_intron_length,
+            research_size: DEFAULT_RESEARCH_SIZE,
+            research_intergenic: self.behavior.research_intergenic,
+            search_long_introns: self.behavior.search_long_introns,
+            extend_terminal_stop: self.tuning.extend_terminal_stop,
+            peak_augment: self.tuning.peak_augment,
+            promote_transcript_orfs: self.behavior.promote_transcript_orfs,
+            alt_splice: self.behavior.alt_splice,
+            min_coding_length: DEFAULT_MIN_CODING_LENGTH,
+            stringent_overlap: self.tuning.stringent_overlap,
+        }
+    }
+}
+
 /// `consensus`: build EVM-style consensus gene models by integrating weighted evidence
 /// across both strands, then emit them as GFF3 (or GTF). Low-support genes are flagged,
 /// not dropped, unless `--strict` is given.
 fn run_consensus(a: ConsensusArgs) -> Result<()> {
     use combinr::consensus::to_out_genes;
     use combinr::model::Strand;
-    use combinr::pipeline::{ConsensusConfig, consensus_sources, consensus_with_isoforms};
 
     init_threads(a.common.threads);
     let fmt = a.common.format;
@@ -134,29 +165,7 @@ fn run_consensus(a: ConsensusArgs) -> Result<()> {
     let strict = a.behavior.strict;
     let alt_splice = a.behavior.alt_splice;
     let events_path = a.behavior.events.clone();
-    let cfg = ConsensusConfig {
-        weights: a.inputs.weights,
-        gene_predictions: a.inputs.gene_predictions,
-        protein_alignments: a.inputs.protein_alignments,
-        transcript_alignments: a.inputs.transcript_alignments,
-        genome: a.inputs.genome,
-        repeats: a.inputs.repeats,
-        genetic_code: a.tuning.genetic_code,
-        flank: a.behavior.flank,
-        strict,
-        max_prev_exons: a.tuning.max_prev_exons,
-        min_score_ratio: a.tuning.min_score_ratio,
-        min_intron_length: a.tuning.min_intron_length,
-        research_size: 10_000,
-        research_intergenic: a.behavior.research_intergenic,
-        search_long_introns: a.behavior.search_long_introns,
-        extend_terminal_stop: a.tuning.extend_terminal_stop,
-        peak_augment: a.tuning.peak_augment,
-        promote_transcript_orfs: a.behavior.promote_transcript_orfs,
-        alt_splice,
-        min_coding_length: 150,
-        stringent_overlap: a.tuning.stringent_overlap,
-    };
+    let cfg = a.into_config();
 
     // --alt-splice: emit consensus + transcript-isoform mRNAs and a region-tagged events TSV.
     if alt_splice {

@@ -190,24 +190,14 @@ fn force_flexorient(alignments: &[Alignment], forced: Strand) -> Vec<Alignment> 
 }
 
 /// Highest-count aligned orientation; deterministic tie-break (Plus < Minus <
-/// Unknown). Returns `Unknown` only if there are no members.
+/// Unknown, via `Strand`'s derived `Ord`). Returns `Unknown` only if there are no
+/// members.
 fn majority_orient(counts: &HashMap<Strand, usize>) -> Strand {
     counts
         .iter()
-        .max_by(|a, b| {
-            a.1.cmp(b.1)
-                .then_with(|| strand_rank(*b.0).cmp(&strand_rank(*a.0)))
-        })
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
         .map(|(s, _)| *s)
         .unwrap_or(Strand::Unknown)
-}
-
-fn strand_rank(s: Strand) -> u8 {
-    match s {
-        Strand::Plus => 0,
-        Strand::Minus => 1,
-        Strand::Unknown => 2,
-    }
 }
 
 #[cfg(test)]

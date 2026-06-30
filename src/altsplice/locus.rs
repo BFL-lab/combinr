@@ -54,19 +54,19 @@ pub fn build_isoforms(assemblies: &[ClusterAssembly]) -> Vec<Isoform> {
 /// share a locus when their genomic spans overlap by at least that percent of the
 /// **shorter** span. At `0.0` any overlap groups them (the historical behavior).
 pub fn group_into_loci(isoforms: &mut [Isoform], min_overlap_frac: f64) -> Vec<Locus> {
-    // bucket indices by (contig, strand)
-    let mut buckets: BTreeMap<(String, u8), Vec<usize>> = BTreeMap::new();
+    // bucket indices by (contig, strand). `Strand` derives `Ord`, so the key order is
+    // deterministic (Plus < Minus < Unknown) without a manual u8 table.
+    let mut buckets: BTreeMap<(String, Strand), Vec<usize>> = BTreeMap::new();
     for (i, iso) in isoforms.iter().enumerate() {
         buckets
-            .entry((iso.contig.clone(), strand_key(iso.strand)))
+            .entry((iso.contig.clone(), iso.strand))
             .or_default()
             .push(i);
     }
 
     // ordered list of runs (each becomes a locus), sorted deterministically.
     let mut runs: Vec<(String, Strand, i64, Vec<usize>)> = Vec::new();
-    for ((contig, skey), idxs) in buckets {
-        let strand = strand_from_key(skey);
+    for ((contig, strand), idxs) in buckets {
         let spans: Vec<Coordset> = idxs
             .iter()
             .map(|&i| Coordset::new(isoforms[i].exons[0].lend, span_rend(&isoforms[i])))
@@ -83,9 +83,7 @@ pub fn group_into_loci(isoforms: &mut [Isoform], min_overlap_frac: f64) -> Vec<L
     }
 
     // assign deterministic locus + isoform ids.
-    runs.sort_by(|a, b| {
-        (a.0.as_str(), strand_key(a.1), a.2).cmp(&(b.0.as_str(), strand_key(b.1), b.2))
-    });
+    runs.sort_by(|a, b| (a.0.as_str(), a.1, a.2).cmp(&(b.0.as_str(), b.1, b.2)));
 
     let mut loci = Vec::with_capacity(runs.len());
     for (n, (contig, strand, _lend, idxs)) in runs.into_iter().enumerate() {
@@ -105,21 +103,6 @@ pub fn group_into_loci(isoforms: &mut [Isoform], min_overlap_frac: f64) -> Vec<L
 
 fn span_rend(iso: &Isoform) -> i64 {
     iso.exons.last().map(|e| e.rend).unwrap_or(i64::MIN)
-}
-
-fn strand_key(s: Strand) -> u8 {
-    match s {
-        Strand::Plus => 0,
-        Strand::Minus => 1,
-        Strand::Unknown => 2,
-    }
-}
-fn strand_from_key(k: u8) -> Strand {
-    match k {
-        0 => Strand::Plus,
-        1 => Strand::Minus,
-        _ => Strand::Unknown,
-    }
 }
 
 #[cfg(test)]

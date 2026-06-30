@@ -45,16 +45,16 @@ fn cluster_strand(a: &Alignment) -> Strand {
 /// `0.0` (the default) any single shared base links them — identical to the
 /// historical any-overlap sweep.
 pub fn cluster_alignments(alignments: &[Alignment], min_overlap_frac: f64) -> Vec<Cluster> {
-    // Bucket indices by (contig, strand), preserving deterministic key order.
-    let mut buckets: BTreeMap<(String, u8), Vec<usize>> = BTreeMap::new();
+    // Bucket indices by (contig, strand). `Strand` derives `Ord` (Plus < Minus <
+    // Unknown), so the `BTreeMap` key order is deterministic without a manual table.
+    let mut buckets: BTreeMap<(String, Strand), Vec<usize>> = BTreeMap::new();
     for (i, a) in alignments.iter().enumerate() {
-        let key = (a.contig.clone(), strand_key(cluster_strand(a)));
+        let key = (a.contig.clone(), cluster_strand(a));
         buckets.entry(key).or_default().push(i);
     }
 
     let mut clusters = Vec::new();
-    for ((contig, skey), idxs) in buckets {
-        let strand = strand_from_key(skey);
+    for ((contig, strand), idxs) in buckets {
         let spans: Vec<Coordset> = idxs.iter().map(|&i| alignments[i].coords).collect();
         for group in single_linkage_groups(&spans, min_overlap_frac) {
             clusters.push(Cluster {
@@ -65,21 +65,6 @@ pub fn cluster_alignments(alignments: &[Alignment], min_overlap_frac: f64) -> Ve
         }
     }
     clusters
-}
-
-fn strand_key(s: Strand) -> u8 {
-    match s {
-        Strand::Plus => 0,
-        Strand::Minus => 1,
-        Strand::Unknown => 2,
-    }
-}
-fn strand_from_key(k: u8) -> Strand {
-    match k {
-        0 => Strand::Plus,
-        1 => Strand::Minus,
-        _ => Strand::Unknown,
-    }
 }
 
 /// A set of spans grouped into one region (indices into the input slice), keyed by

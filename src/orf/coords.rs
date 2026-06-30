@@ -82,21 +82,6 @@ impl SplicedTranscript {
         None
     }
 
-    /// Genomic coordinate of a transcript offset (must be in range).
-    pub fn tpos_to_genomic(&self, t: usize) -> Option<i64> {
-        for p in &self.pieces {
-            if t >= p.t_start && t < p.t_start + p.len {
-                let off = (t - p.t_start) as i64;
-                return Some(if self.plus {
-                    p.genomic.lend + off
-                } else {
-                    p.genomic.rend - off
-                });
-            }
-        }
-        None
-    }
-
     /// The spliced cDNA sequence (5'→3', uppercased) read from the genome, or
     /// `None` if any exon is out of bounds.
     pub fn sequence(&self, fa: &Fasta, contig: &str) -> Option<Vec<u8>> {
@@ -190,8 +175,6 @@ mod tests {
         assert_eq!(t.genomic_to_tpos(200), Some(5));
         assert_eq!(t.genomic_to_tpos(204), Some(9));
         assert_eq!(t.genomic_to_tpos(150), None); // intronic
-        assert_eq!(t.tpos_to_genomic(0), Some(100));
-        assert_eq!(t.tpos_to_genomic(5), Some(200));
         // transcript [3, 7) spans the junction: 103-104 and 200-201
         let segs = t.genomic_segments_for_tspan(3, 7);
         assert_eq!(segs, vec![cs(103, 104), cs(200, 201)]);
@@ -207,8 +190,6 @@ mod tests {
         assert_eq!(t.genomic_to_tpos(200), Some(4));
         assert_eq!(t.genomic_to_tpos(104), Some(5));
         assert_eq!(t.genomic_to_tpos(100), Some(9));
-        assert_eq!(t.tpos_to_genomic(0), Some(204));
-        assert_eq!(t.tpos_to_genomic(9), Some(100));
         // transcript [3, 7): 201-204 (3 bases of first exon) wait -> compute
         let segs = t.genomic_segments_for_tspan(3, 7);
         // t3..t6 inclusive: t3=201,t4=200 (exon2), t5=104,t6=103 (exon1)

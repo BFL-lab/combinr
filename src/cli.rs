@@ -52,14 +52,6 @@ pub struct CommonOpts {
         help_heading = "Execution and logging"
     )]
     pub threads: usize,
-    /// Increase logging verbosity (repeatable).
-    #[arg(
-        short,
-        long,
-        action = clap::ArgAction::Count,
-        help_heading = "Execution and logging"
-    )]
-    pub verbose: u8,
 }
 
 #[derive(Subcommand, Debug)]
