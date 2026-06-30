@@ -53,9 +53,9 @@ the consolidation they perform:
 
 `weights` (EvClass + weights file) → `evidence` (self-contained GFF3 → `EvidenceChain`,
 keyed on GFF **column-2 source**; predictions read from `CDS` rows, alignments from
-`Target=` match chains) → `candidates` (per-base coding vector + evidence introns/sites +
+`Target=` match chains) → `candidates` (per-base coding vector + evidence introns +
 frame-aware `ExonCandidate`s; intergenic population; opt-in terminal-stop extension +
-peak augmentation) → `grammar` + `trellis` (the gene-structure DP: `classify`,
+peak augmentation via `peaks`) → `grammar` + `trellis` (the gene-structure DP: `classify`,
 `score_exon`, `are_compatible_exons`, `run_trellis`) → `engine` (both strands via
 reverse-complement-then-transpose; tail/intergenic/long-intron recursion; CDS/UTR
 projection) → `filter` (flag-not-drop low-support) → `output` (→ `OutGene`). `repeats`

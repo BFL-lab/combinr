@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(exons[0].end_frame, 3); // (21)%3 == 0 -> 3, connects to start 1
         let base = vec![10.0, 15.0];
         let mut introns = IntronScores::default();
-        introns.add((121, 199), 1.0, 5, "p", "fgenesh", true); // score 5
+        introns.add((121, 199), 1.0, 5); // score 5
         let v = vectors();
         let code = GeneticCode::default();
 
@@ -364,7 +364,7 @@ mod tests {
         ];
         let base = vec![10.0, 15.0];
         let mut introns = IntronScores::default();
-        introns.add((121, 199), 1.0, 5, "p", "fgenesh", true);
+        introns.add((121, 199), 1.0, 5);
         let v = vectors();
         let code = GeneticCode::default();
         let genes = run_trellis(&exons, &base, (1, 300), &introns, &v, &code, 1.0, 500);
@@ -387,7 +387,7 @@ mod tests {
         let exons = vec![a, b];
         let base = vec![10.0, 15.0];
         let mut introns = IntronScores::default();
-        introns.add((122, 199), 1.0, 5, "p", "fgenesh", true);
+        introns.add((122, 199), 1.0, 5);
         let v = vectors();
         let code = GeneticCode::default();
         let genes = run_trellis(&exons, &base, (1, 300), &introns, &v, &code, 1.0, 500);
@@ -428,14 +428,7 @@ mod tests {
             for w in 0..exons.len().saturating_sub(1) {
                 if rng() % 2 == 0 {
                     let (a, b) = (&exons[w], &exons[w + 1]);
-                    introns.add(
-                        (a.coords.rend + 1, b.coords.lend - 1),
-                        1.0,
-                        5,
-                        "x",
-                        "s",
-                        true,
-                    );
+                    introns.add((a.coords.rend + 1, b.coords.lend - 1), 1.0, 5);
                 }
             }
             let v = RegionVectors::new(1, (pos + 100) as usize);

@@ -21,8 +21,8 @@
 
 use crate::consensus::evidence::EvidenceChain;
 use crate::consensus::exon::{ExonCandidate, ExonType, determine_good_phases, end_frame_for};
+use crate::consensus::peaks::PeakSignal;
 use crate::consensus::region::ConsensusRegion;
-use crate::consensus::sites::SiteSets;
 use crate::consensus::vectors::{IntronScores, RegionVectors};
 use crate::consensus::weights::EvClass;
 use crate::io::fasta::Fasta;
@@ -32,10 +32,6 @@ use std::collections::HashMap;
 
 /// Max bp to extend a terminal alignment segment downstream looking for a stop codon.
 const MAX_TERMINAL_EXTEND: i64 = 10_000;
-/// Window (bp) for clustering start/stop termini signals into peaks.
-const CHAIN_TERMINI_WINDOW: i64 = 250;
-/// Max bp between a start/stop peak and the exon it augments the intergenic score toward.
-const START_STOP_RANGE: i64 = 500;
 
 /// Tunables for candidate generation.
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +56,6 @@ pub struct RegionData {
     pub exons: Vec<ExonCandidate>,
     pub vectors: RegionVectors,
     pub introns: IntronScores,
-    pub sites: SiteSets,
 }
 
 /// Build candidate exons + scoring data for a region in its working coordinate space
@@ -81,17 +76,14 @@ pub fn build_candidates(
         code: &params.code,
         min_intron_length: params.min_intron_length,
         extend_terminal_stop: params.extend_terminal_stop,
-        peak_augment: params.peak_augment,
         sum_genepred_weights: params.sum_genepred_weights,
-        origin: span.lend,
         vectors: RegionVectors::new(span.lend, len),
         introns: IntronScores::default(),
-        sites: SiteSets::default(),
         exons: Vec::new(),
         dedup: HashMap::new(),
         abinitio_spans: HashMap::new(),
-        begins: vec![0.0; len],
-        ends: vec![0.0; len],
+        // Only allocate the per-base peak signal when the opt-in feature is on.
+        peaks: params.peak_augment.then(|| PeakSignal::new(span.lend, len)),
     };
 
     // Mask repeats before painting any coverage, so masked bases contribute nothing.
@@ -112,8 +104,8 @@ pub fn build_candidates(
         }
     }
     b.populate_intergenic();
-    if b.peak_augment {
-        b.augment_peaks();
+    if let Some(peaks) = b.peaks.take() {
+        peaks.augment(&b.exons, &mut b.vectors, b.sum_genepred_weights);
     }
 
     RegionData {
@@ -122,7 +114,6 @@ pub fn build_candidates(
         exons: b.exons,
         vectors: b.vectors,
         introns: b.introns,
-        sites: b.sites,
     }
 }
 
@@ -132,19 +123,15 @@ struct Builder<'a> {
     code: &'a GeneticCode,
     min_intron_length: i64,
     extend_terminal_stop: bool,
-    peak_augment: bool,
     sum_genepred_weights: f64,
-    origin: i64,
     vectors: RegionVectors,
     introns: IntronScores,
-    sites: SiteSets,
     exons: Vec<ExonCandidate>,
     dedup: HashMap<(i64, i64, ExonType, u8), usize>,
     /// Abinitio prediction gene spans by ev_type, for intergenic-zone scoring.
     abinitio_spans: HashMap<String, (f64, Vec<Coordset>)>,
-    /// Per-base start/stop termini signal (from protein chain ends), for peak detection.
-    begins: Vec<f64>,
-    ends: Vec<f64>,
+    /// Start/stop termini signal for the opt-in `--peak-augment` feature; `None` when off.
+    peaks: Option<PeakSignal>,
 }
 
 impl Builder<'_> {
@@ -170,25 +157,19 @@ impl Builder<'_> {
                 self.vectors.add_coverage(seg.lend, seg.rend, chain.weight);
             }
             self.try_add_exon(*seg, exon_type, start_frame, chain);
-            match exon_type {
-                ExonType::Initial => self.sites.add_start(seg.lend),
-                ExonType::Terminal => self.sites.add_stop(seg.rend),
-                ExonType::Single => {
-                    self.sites.add_start(seg.lend);
-                    self.sites.add_stop(seg.rend);
-                }
-                _ => {}
-            }
             cum_len += seg.len();
         }
-        self.add_introns(chain, is_abinitio);
+        self.add_introns(chain);
     }
 
     fn add_protein(&mut self, chain: &EvidenceChain) {
         let n = chain.links.len();
-        // protein chain termini feed the start/stop peak vectors
-        self.bump_begin(chain.span.lend, chain.weight);
-        self.bump_end(chain.span.rend, chain.weight);
+        // protein chain termini feed the start/stop peak signal (only built when peak
+        // augmentation is enabled).
+        if let Some(peaks) = &mut self.peaks {
+            peaks.bump_begin(chain.span.lend, chain.weight);
+            peaks.bump_end(chain.span.rend, chain.weight);
+        }
         for (i, seg) in chain.links.iter().enumerate() {
             // proteins paint the coding vector for every segment, splice or not
             self.vectors.add_coverage(seg.lend, seg.rend, chain.weight);
@@ -196,7 +177,7 @@ impl Builder<'_> {
                 self.add_internal_evidence_exon(*seg, chain);
             }
         }
-        self.add_introns(chain, false);
+        self.add_introns(chain);
         if self.extend_terminal_stop
             && let Some(last) = chain.links.last()
         {
@@ -213,28 +194,11 @@ impl Builder<'_> {
                 self.add_internal_evidence_exon(*seg, chain);
             }
         }
-        self.add_introns(chain, false);
+        self.add_introns(chain);
         if self.extend_terminal_stop
             && let Some(last) = chain.links.last()
         {
             self.try_extend_terminal(*last, chain);
-        }
-    }
-
-    fn idx(&self, g: i64) -> Option<usize> {
-        let k = g - self.origin;
-        (k >= 0 && (k as usize) < self.begins.len()).then_some(k as usize)
-    }
-
-    fn bump_begin(&mut self, g: i64, w: f64) {
-        if let Some(k) = self.idx(g) {
-            self.begins[k] += w;
-        }
-    }
-
-    fn bump_end(&mut self, g: i64, w: f64) {
-        if let Some(k) = self.idx(g) {
-            self.ends[k] += w;
         }
     }
 
@@ -261,7 +225,6 @@ impl Builder<'_> {
                     phase,
                     chain,
                 );
-                self.sites.add_stop(stop_end);
             }
         }
     }
@@ -284,45 +247,6 @@ impl Builder<'_> {
             cs += 3;
         }
         None
-    }
-
-    /// `augment_intergenic_from_start_stop_peaks` (~4262): find start/stop termini peaks
-    /// and max out the intergenic score between each peak and the nearest matching exon,
-    /// promoting a gene boundary there.
-    fn augment_peaks(&mut self) {
-        let level = self.sum_genepred_weights;
-        let starts = find_peaks(&self.begins, self.origin, CHAIN_TERMINI_WINDOW, level);
-        let stops = find_peaks(&self.ends, self.origin, CHAIN_TERMINI_WINDOW, level);
-        for p in starts {
-            if let Some(edge) = self.nearest_exon_edge(p, true) {
-                let (lo, hi) = (edge.min(p), edge.max(p));
-                self.vectors.set_intergenic_max(lo, hi, level);
-            }
-        }
-        for p in stops {
-            if let Some(edge) = self.nearest_exon_edge(p, false) {
-                let (lo, hi) = (edge.min(p), edge.max(p));
-                self.vectors.set_intergenic_max(lo, hi, level);
-            }
-        }
-    }
-
-    /// Nearest initial/single exon `lend` to a start peak (`start=true`) or terminal/single
-    /// exon `rend` to a stop peak, within `START_STOP_RANGE`.
-    fn nearest_exon_edge(&self, peak: i64, start: bool) -> Option<i64> {
-        let mut best: Option<(i64, i64)> = None; // (distance, edge)
-        for e in &self.exons {
-            let edge = match (start, e.exon_type) {
-                (true, ExonType::Initial | ExonType::Single) => e.coords.lend,
-                (false, ExonType::Terminal | ExonType::Single) => e.coords.rend,
-                _ => continue,
-            };
-            let dist = (edge - peak).abs();
-            if dist <= START_STOP_RANGE && best.map(|(d, _)| dist < d).unwrap_or(true) {
-                best = Some((dist, edge));
-            }
-        }
-        best.map(|(_, edge)| edge)
     }
 
     /// Add internal exons in every reading frame with no in-frame stop.
@@ -412,8 +336,9 @@ impl Builder<'_> {
     /// `populate_intergenic_regions` (~3173): for each ab-initio prediction program,
     /// add its weight to every base of the gaps between its predicted genes.
     fn populate_intergenic(&mut self) {
-        let progs: Vec<(f64, Vec<Coordset>)> = self.abinitio_spans.values().cloned().collect();
-        for (weight, mut spans) in progs {
+        // `abinitio_spans` is not used again — take ownership instead of cloning it.
+        let progs = std::mem::take(&mut self.abinitio_spans);
+        for (weight, mut spans) in progs.into_values() {
             spans.sort_by_key(|c| c.lend);
             for w in spans.windows(2) {
                 let gap = w[0].gap_to(&w[1]);
@@ -425,7 +350,7 @@ impl Builder<'_> {
     }
 
     /// Every gap between consecutive links becomes an evidence-supported intron.
-    fn add_introns(&mut self, chain: &EvidenceChain, is_abinitio: bool) {
+    fn add_introns(&mut self, chain: &EvidenceChain) {
         for w in chain.links.windows(2) {
             let intron = w[0].gap_to(&w[1]);
             if intron.len() < self.min_intron_length {
@@ -435,15 +360,8 @@ impl Builder<'_> {
             if unmasked <= 0 {
                 continue;
             }
-            self.introns.add(
-                (intron.lend, intron.rend),
-                chain.weight,
-                unmasked,
-                &chain.accession,
-                &chain.ev_type,
-                is_abinitio,
-            );
-            self.sites.add_intron(intron.lend, intron.rend);
+            self.introns
+                .add((intron.lend, intron.rend), chain.weight, unmasked);
         }
     }
 }
@@ -458,37 +376,6 @@ fn position_type(i: usize, n: usize) -> ExonType {
     } else {
         ExonType::Internal
     }
-}
-
-/// Cluster non-zero per-base signal within `window` bp and emit the max-signal genomic
-/// position of each cluster whose total exceeds `threshold` (a simplified `analyze_peaks`).
-fn find_peaks(v: &[f64], origin: i64, window: i64, threshold: f64) -> Vec<i64> {
-    let sig: Vec<(i64, f64)> = v
-        .iter()
-        .enumerate()
-        .filter(|&(_, x)| *x > 0.0)
-        .map(|(k, &x)| (origin + k as i64, x))
-        .collect();
-    let mut peaks = Vec::new();
-    let mut i = 0;
-    while i < sig.len() {
-        let start = sig[i].0;
-        let (mut sum, mut best_pos, mut best_val) = (0.0, sig[i].0, sig[i].1);
-        let mut j = i;
-        while j < sig.len() && sig[j].0 - start <= window {
-            sum += sig[j].1;
-            if sig[j].1 > best_val {
-                best_val = sig[j].1;
-                best_pos = sig[j].0;
-            }
-            j += 1;
-        }
-        if sum > threshold {
-            peaks.push(best_pos);
-        }
-        i = j;
-    }
-    peaks
 }
 
 #[cfg(test)]
@@ -546,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn prediction_yields_typed_framed_exons_intron_coverage_and_sites() {
+    fn prediction_yields_typed_framed_exons_and_intron_coverage() {
         // two CDS exons, intron 19..49 (31 bp >= min 20), terminal stop TAA at 56..58
         let g = genome(70, &[(56, b"TAA")]);
         let chains = vec![chain(
@@ -570,11 +457,6 @@ mod tests {
         // one evidence-supported intron, scored weight*unmasked_len = 1*31
         assert!(rd.introns.contains((19, 49)));
         assert_eq!(rd.introns.score((19, 49)), Some(31.0));
-        assert_eq!(rd.introns.predicted((19, 49)), 31.0);
-
-        // sites: start at first exon lend, stop at last exon rend, donor/acceptor
-        assert!(rd.sites.is_start(10) && rd.sites.is_stop(58));
-        assert!(rd.sites.is_donor(19) && rd.sites.is_acceptor(49));
     }
 
     #[test]
@@ -668,15 +550,5 @@ mod tests {
         assert!(on.exons.iter().any(|e| {
             e.exon_type == ExonType::Terminal && e.coords.lend == 40 && e.coords.rend == 54
         }));
-    }
-
-    #[test]
-    fn find_peaks_clusters_and_thresholds() {
-        let mut v = vec![0.0; 600];
-        v[0] = 2.0; // genomic 100
-        v[5] = 3.0; // genomic 105 (same cluster within window 250); sum 5, max at 105
-        v[500] = 10.0; // genomic 600 (separate cluster); sum 10
-        assert_eq!(find_peaks(&v, 100, 250, 1.0), vec![105, 600]);
-        assert_eq!(find_peaks(&v, 100, 250, 6.0), vec![600]); // only the sum-10 cluster passes
     }
 }

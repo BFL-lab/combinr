@@ -2,8 +2,8 @@
 //!
 //! [`RegionVectors`] holds the EVM `@CODING_SCORES`, `@INTERGENIC_SCORES` and repeat
 //! `@MASK` arrays, but region-local (indexed by offset from the region origin) rather
-//! than whole-contig. The coding vector is rebuilt per strand pass; the intergenic
-//! vector and [`IntronScores`] are forward-coordinate and shared across both strands.
+//! than whole-contig. All three are built fresh for each strand pass — the engine
+//! reverse-complements the region and rebuilds the candidates for the minus strand.
 
 use fixedbitset::FixedBitSet;
 use std::collections::HashMap;
@@ -35,6 +35,15 @@ impl RegionVectors {
         }
         let k = (g - self.origin) as usize;
         (k < self.len).then_some(k)
+    }
+
+    /// The half-open offset range covering the genomic span `[lend, rend]`, clipped to the
+    /// region. Out-of-range bases simply fall outside the range (they contribute nothing),
+    /// matching the per-base `idx` bounds check the mask-free scoring loops used to do.
+    fn clamp(&self, lend: i64, rend: i64) -> std::ops::Range<usize> {
+        let lo = (lend - self.origin).clamp(0, self.len as i64) as usize;
+        let hi = (rend - self.origin + 1).clamp(0, self.len as i64) as usize;
+        lo..hi.max(lo)
     }
 
     /// Mark `[lend, rend]` as repeat-masked (excluded from scoring).
@@ -69,20 +78,13 @@ impl RegionVectors {
     }
 
     /// `score_exons` coding contribution (~line 2230): `Σ max(0, coding[i])` over
-    /// `[lend, rend]` (negative coding scores do not subtract).
+    /// `[lend, rend]` (negative coding scores do not subtract). The mask is not consulted
+    /// here — masked bases were never painted, so they are already 0.
     pub fn coding_sum(&self, lend: i64, rend: i64) -> f64 {
-        let mut s = 0.0;
-        for g in lend..=rend {
-            if let Some(k) = self.idx(g) {
-                s += self.coding[k].max(0.0);
-            }
-        }
-        s
-    }
-
-    /// Reset the coding vector before a new strand pass.
-    pub fn clear_coding(&mut self) {
-        self.coding.iter_mut().for_each(|v| *v = 0.0);
+        self.coding[self.clamp(lend, rend)]
+            .iter()
+            .map(|&v| v.max(0.0))
+            .sum()
     }
 
     /// Add `weight` to the intergenic score of each unmasked base in `[lend, rend]`.
@@ -111,13 +113,7 @@ impl RegionVectors {
     /// `calc_intergenic_score` (~line 3294): `Σ intergenic[i]` over `[lend, rend]`,
     /// scaled by `adjust` (EVM's `INTERGENIC_SCORE_ADJUST_FACTOR`).
     pub fn intergenic_score(&self, lend: i64, rend: i64, adjust: f64) -> f64 {
-        let mut s = 0.0;
-        for g in lend..=rend {
-            if let Some(k) = self.idx(g) {
-                s += self.intergenic[k];
-            }
-        }
-        s * adjust
+        self.intergenic[self.clamp(lend, rend)].iter().sum::<f64>() * adjust
     }
 
     /// Number of unmasked bases in `[lend, rend]` (for length-aware scoring).
@@ -135,53 +131,25 @@ impl RegionVectors {
 }
 
 /// Evidence-supported introns, keyed by `(intron_lend, intron_rend)` in forward genomic
-/// coordinates (the gap between two exons). Ports `%INTRONS_TO_SCORE`,
-/// `%INTRONS_TO_EVIDENCE` and `%PREDICTED_INTRONS` (abinitio-only).
+/// coordinates (the gap between two exons). Ports EVM's `%INTRONS_TO_SCORE`.
 #[derive(Default)]
 pub struct IntronScores {
     score: HashMap<(i64, i64), f64>,
-    evidence: HashMap<(i64, i64), Vec<(String, String)>>,
-    predicted: HashMap<(i64, i64), f64>,
 }
 
 impl IntronScores {
     /// Accumulate one evidence chain's support for the intron `(lend, rend)`:
-    /// `weight * unmasked_len` added to the intron's score (and to the abinitio-only
-    /// predicted-intron pool when `is_abinitio`).
-    pub fn add(
-        &mut self,
-        intron: (i64, i64),
-        weight: f64,
-        unmasked_len: i64,
-        acc: &str,
-        ev_type: &str,
-        is_abinitio: bool,
-    ) {
-        let contrib = weight * unmasked_len as f64;
-        *self.score.entry(intron).or_default() += contrib;
-        self.evidence
-            .entry(intron)
-            .or_default()
-            .push((acc.to_string(), ev_type.to_string()));
-        if is_abinitio {
-            *self.predicted.entry(intron).or_default() += contrib;
-        }
+    /// `weight * unmasked_len` added to the intron's score.
+    pub fn add(&mut self, intron: (i64, i64), weight: f64, unmasked_len: i64) {
+        *self.score.entry(intron).or_default() += weight * unmasked_len as f64;
     }
 
     pub fn score(&self, intron: (i64, i64)) -> Option<f64> {
         self.score.get(&intron).copied()
     }
 
-    pub fn predicted(&self, intron: (i64, i64)) -> f64 {
-        self.predicted.get(&intron).copied().unwrap_or(0.0)
-    }
-
     pub fn contains(&self, intron: (i64, i64)) -> bool {
         self.score.contains_key(&intron)
-    }
-
-    pub fn evidence(&self, intron: (i64, i64)) -> &[(String, String)] {
-        self.evidence.get(&intron).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn len(&self) -> usize {
@@ -231,14 +199,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_coding_resets() {
-        let mut v = RegionVectors::new(1, 10);
-        v.add_coverage(1, 10, 4.0);
-        v.clear_coding();
-        assert_eq!(v.coding_sum(1, 10), 0.0);
-    }
-
-    #[test]
     fn intergenic_score_scales_by_adjust() {
         let mut v = RegionVectors::new(1, 10);
         v.add_intergenic(1, 5, 2.0);
@@ -258,14 +218,12 @@ mod tests {
     }
 
     #[test]
-    fn intron_scores_accumulate_and_track_abinitio() {
+    fn intron_scores_accumulate() {
         let mut introns = IntronScores::default();
-        introns.add((200, 299), 1.0, 100, "a1", "fgenesh", true);
-        introns.add((200, 299), 5.0, 100, "p1", "genewise", false);
+        introns.add((200, 299), 1.0, 100);
+        introns.add((200, 299), 5.0, 100);
         assert!(introns.contains((200, 299)));
         assert_eq!(introns.score((200, 299)), Some(600.0)); // 1*100 + 5*100
-        assert_eq!(introns.predicted((200, 299)), 100.0); // abinitio only
-        assert_eq!(introns.evidence((200, 299)).len(), 2);
         assert_eq!(introns.score((1, 2)), None);
     }
 }
