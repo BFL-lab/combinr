@@ -244,6 +244,9 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
 - **Consensus gene models** (`consensus`) to stdout as GFF3 `gene`/`mRNA`/`exon`/`CDS`
   with CDS phases (the exon structure is the coding structure). Each mRNA carries
   `score`, `score_ratio`, `coding_length`, `low_support`, and `partial5`/`partial3`.
+  A 5'-partial gene (`partial5=true`) starts its CDS at its first exon base, and the
+  first CDS row's phase gives the offset to the first complete codon (no partial-codon
+  UTR).
 - **Consensus evidence report** (`consensus --evidence-report <file>`, EVidenceModeler
   `.evm.out` style) for screening genes by their support. Two `##` lines describe the
   format; then per gene a `#` header with its GFF3 gene ID, span, strand, `score`,

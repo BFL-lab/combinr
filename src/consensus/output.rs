@@ -89,9 +89,51 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
                     five_utr: g.five_utr.clone(),
                     three_utr: g.three_utr.clone(),
                     attrs,
-                    cds_start_phase: 0,
+                    cds_start_phase: g.cds_start_phase,
                 }],
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consensus::filter::SupportFlags;
+    use crate::model::{Coordset, Strand};
+
+    fn gene(lend: i64, partial5: bool, cds_start_phase: u8) -> CalledGene {
+        let ex = vec![Coordset::new(lend, lend + 29)];
+        CalledGene {
+            contig: "chr1".into(),
+            orient: Strand::Plus,
+            exons: ex.clone(),
+            cds: ex,
+            five_utr: vec![],
+            three_utr: vec![],
+            partial5,
+            partial3: false,
+            cds_start_phase,
+            score: 100.0,
+            support: SupportFlags {
+                raw_noncoding: 0.0,
+                noncoding_equivalent: 1.0,
+                score_ratio: 100.0,
+                coding_length: 30,
+                low_support: false,
+            },
+            promoted: false,
+            features: vec![],
+        }
+    }
+
+    #[test]
+    fn to_out_genes_carries_the_cds_start_phase() {
+        let out = to_out_genes(&[gene(10, false, 0), gene(100, true, 2)]);
+        let t = |i: usize| &out[i].transcripts[0];
+        assert_eq!(t(0).cds[0].lend, 10);
+        assert_eq!(t(0).cds_start_phase, 0, "complete gene: phase 0");
+        assert_eq!(t(1).cds[0].lend, 100);
+        assert_eq!(t(1).cds_start_phase, 2, "5'-partial gene: its phase");
+    }
 }

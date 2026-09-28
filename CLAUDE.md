@@ -30,6 +30,8 @@ the consolidation they perform:
 
 - **Coordinates are 1-based, inclusive, `lend <= rend`** (`model::Coordset`). Strand is
   `Plus` / `Minus` / `Unknown`.
+- **A 5'-partial CDS starts at the transcript's first base**, its leading partial codon
+  carried as the first CDS row's GFF3 phase (`cds_start_phase`), never as a 5'UTR.
 - **No canonical splice-site bias** (the project's defining principle). Splice junctions
   are positional, strand is verbatim from input, and `consensus` derives candidate
   splice/start/stop sites from the *evidence* (union of observed intron boundaries + CDS

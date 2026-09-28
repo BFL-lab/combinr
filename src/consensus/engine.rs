@@ -13,7 +13,7 @@
 
 use crate::consensus::candidates::{CandidateParams, RegionData, build_candidates};
 use crate::consensus::evidence::EvidenceChain;
-use crate::consensus::exon::ExonType;
+use crate::consensus::exon::{ExonType, frame_offset};
 use crate::consensus::filter::{FilterParams, SupportFlags, assess};
 use crate::consensus::region::ConsensusRegion;
 use crate::consensus::trellis::{ConsensusGene, run_trellis, score_all_exons};
@@ -51,6 +51,10 @@ pub struct CalledGene {
     pub three_utr: Vec<Coordset>,
     pub partial5: bool,
     pub partial3: bool,
+    /// GFF3 phase of the 5'-most CDS base: the number of bases before the first complete
+    /// codon. Nonzero only for a 5'-partial gene, whose CDS starts at its first exon base
+    /// (the partial codon is coding, not UTR); 0 for a gene with a start codon.
+    pub cds_start_phase: u8,
     pub score: f64,
     pub support: SupportFlags,
     /// True for a transcript-ORF gene recovered at a locus with no consensus CDS
@@ -298,17 +302,29 @@ fn resolve(
     let last = &rd.exons[*g.exon_indices.last().unwrap()];
     let has_start = matches!(first.exon_type, ExonType::Initial | ExonType::Single);
     let has_stop = matches!(last.exon_type, ExonType::Terminal | ExonType::Single);
-    // codon-aligned reading start within the spliced transcript (0 for a clean 5' start)
-    let cds_t_start = first.start_frame.saturating_sub(1) as usize;
+    // first complete codon within the spliced transcript: a 5'-partial path begins with
+    // a partial codon of `p` bases (0 for an initial/single exon, which is always frame 1)
+    let p = frame_offset(first.start_frame);
 
     let st = SplicedTranscript::new(&exons, orient);
-    let (cds, five_utr, three_utr, hit_stop) = match st.sequence(genome, contig) {
+    let (cds, five_utr, three_utr, hit_stop, cds_start_phase) = match st.sequence(genome, contig) {
         Some(seq) => {
-            let proj = st.project_orf(&seq, cds_t_start.min(seq.len()), code);
-            let (cds, five_utr, three_utr) = st.cds_and_utrs(proj.cds_t_start, proj.cds_t_end);
-            (cds, five_utr, three_utr, proj.hit_stop)
+            // the ORF (and its stop) is read from the first complete codon ...
+            let proj = st.project_orf(&seq, p.min(seq.len()), code);
+            // ... but a 5'-partial CDS starts at the transcript's first base, the leading
+            // partial codon carried as the first CDS row's phase (GFF3), not as a 5'UTR
+            let (cds_t_start, phase) = if !has_start && proj.cds_t_end > proj.cds_t_start {
+                (0, p as u8)
+            } else {
+                (proj.cds_t_start, 0)
+            };
+            let (cds, five_utr, three_utr) = st.cds_and_utrs(cds_t_start, proj.cds_t_end);
+            (cds, five_utr, three_utr, proj.hit_stop, phase)
         }
-        None => (exons.clone(), Vec::new(), Vec::new(), has_stop),
+        None => {
+            let phase = if has_start { 0 } else { p as u8 };
+            (exons.clone(), Vec::new(), Vec::new(), has_stop, phase)
+        }
     };
 
     CalledGene {
@@ -320,6 +336,7 @@ fn resolve(
         three_utr,
         partial5: !has_start,
         partial3: !has_stop || !hit_stop,
+        cds_start_phase,
         score: g.score,
         support,
         promoted: false,
@@ -692,6 +709,10 @@ mod tests {
         assert_eq!(gene.cds, vec![Coordset::new(10, 21)]);
         assert!(gene.five_utr.is_empty() && gene.three_utr.is_empty());
         assert!(!gene.partial5 && !gene.partial3);
+        assert_eq!(
+            gene.cds_start_phase, 0,
+            "a gene with a start codon has phase 0"
+        );
     }
 
     #[test]
@@ -754,5 +775,140 @@ mod tests {
         eng.search_long_introns = 20_000;
         let on = consensus_region(&region, &chains, &g, &cand, &filt, &w, &eng, &[]);
         assert!(has_b(&on), "long-intron re-search recovers the nested gene");
+    }
+
+    /// A hand-built region (working coordinates) holding the given path exons, and the
+    /// trellis gene that walks them in order.
+    fn partial_path(len: usize, path: &[(i64, i64, ExonType, u8)]) -> (RegionData, ConsensusGene) {
+        use crate::consensus::exon::{ExonCandidate, end_frame_for};
+        use crate::consensus::vectors::{IntronScores, RegionVectors};
+        let exons = path
+            .iter()
+            .map(|&(l, r, t, sf)| ExonCandidate {
+                coords: Coordset::new(l, r),
+                orient: Strand::Plus,
+                exon_type: t,
+                start_frame: sf,
+                end_frame: end_frame_for(sf, r - l + 1),
+                left_seq_boundary: *b"CC",
+                right_seq_boundary: *b"CC",
+                evidence: ev_g(),
+            })
+            .collect();
+        let rd = RegionData {
+            contig: "chr1".into(),
+            span: Coordset::new(1, len as i64),
+            exons,
+            vectors: RegionVectors::new(1, len),
+            introns: IntronScores::default(),
+        };
+        let g = ConsensusGene {
+            exon_indices: (0..path.len()).collect(),
+            orient: Strand::Plus,
+            score: 1.0,
+        };
+        (rd, g)
+    }
+
+    fn resolve_partial(
+        genome: &Fasta,
+        len: usize,
+        path: &[(i64, i64, ExonType, u8)],
+        orient: Strand,
+        transpose_hi: Option<i64>,
+    ) -> CalledGene {
+        let (rd, g) = partial_path(len, path);
+        let support = SupportFlags {
+            raw_noncoding: 0.0,
+            noncoding_equivalent: 0.0,
+            score_ratio: 0.0,
+            coding_length: 0,
+            low_support: false,
+        };
+        resolve(
+            &g,
+            &rd,
+            "chr1",
+            orient,
+            transpose_hi,
+            support,
+            genome,
+            &GeneticCode::default(),
+        )
+    }
+
+    #[test]
+    fn five_prime_partial_frame2_starts_cds_at_exon_with_phase_2() {
+        // Internal 10..30 (start frame 2: its first base is codon position 2) -> Terminal
+        // 50..60. The next codon starts 2 bases in, at 12: AGC CCC CCC TAA (stop 21..23).
+        // Reading 1 base in (from 11) would hit TAG at 11..13 at once. The CDS starts at
+        // the exon's first base (10) with phase 2; its 3' end (the stop) is unchanged.
+        let g = genome_with(80, &[(11, b"TAG"), (21, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Internal, 2),
+            (50, 60, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(10, 23)],
+            "CDS from exon.lend, ORF read from exon.lend + 2 (stop at 21..23)"
+        );
+        assert!(
+            gene.five_utr.is_empty(),
+            "the partial codon is coding, not UTR"
+        );
+        assert_eq!(gene.cds_start_phase, 2);
+        assert!(gene.partial5, "path starts at an internal exon");
+        assert!(!gene.partial3, "terminal exon + in-frame stop");
+    }
+
+    #[test]
+    fn five_prime_partial_frame3_starts_cds_at_exon_with_phase_1() {
+        // start frame 3: the next codon starts 1 base in, at 11: CTA GCC CCC TAA (stop
+        // 20..22). Reading 2 bases in (from 12) would hit TAG at 12..14 at once.
+        let g = genome_with(80, &[(12, b"TAG"), (20, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Internal, 3),
+            (50, 60, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(10, 22)],
+            "CDS from exon.lend, ORF read from exon.lend + 1 (stop at 20..22)"
+        );
+        assert!(gene.five_utr.is_empty());
+        assert_eq!(gene.cds_start_phase, 1);
+        assert!(gene.partial5);
+        assert!(!gene.partial3);
+    }
+
+    #[test]
+    fn five_prime_partial_frame2_minus_strand() {
+        // The frame-2 case in the RC-local pass (hi = 200): Internal 11..31 (sf 2) ->
+        // Terminal 51..61, i.e. forward 170..190 (5') and 140..150. RC-local codons from
+        // 13: AGC CCC CCC TAA (stop 22..24); from 12 it would hit TAG at 12..14 at once.
+        // The forward genome is the reverse complement of that RC-local sequence.
+        let mut rc = vec![b'C'; 200];
+        rc[11..14].copy_from_slice(b"TAG"); // RC-local 12..14
+        rc[21..24].copy_from_slice(b"TAA"); // RC-local 22..24
+        let g = write_fasta(&reverse_complement(&rc));
+        let path = [
+            (11, 31, ExonType::Internal, 2),
+            (51, 61, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 200, &path, Strand::Minus, Some(200));
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(140, 150), Coordset::new(170, 190)]
+        );
+        // ORF RC-local 13..24 -> forward 177..188 (first complete codon at forward
+        // rend - 2 = 188); the CDS starts at the exon's 5' base (forward 190), phase 2
+        assert_eq!(gene.cds, vec![Coordset::new(177, 190)]);
+        assert!(gene.five_utr.is_empty());
+        assert_eq!(gene.cds_start_phase, 2);
+        assert!(gene.partial5);
+        assert!(!gene.partial3);
     }
 }
