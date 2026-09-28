@@ -79,6 +79,7 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
                 strand: g.orient,
                 lend,
                 rend,
+                attrs: Vec::new(),
                 transcripts: vec![OutTranscript {
                     transcript_id: format!("{gene_id}.mRNA"),
                     contig: g.contig.clone(),
@@ -88,6 +89,7 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
                     five_utr: g.five_utr.clone(),
                     three_utr: g.three_utr.clone(),
                     attrs,
+                    cds_start_phase: 0,
                 }],
             }
         })

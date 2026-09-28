@@ -107,6 +107,44 @@ pub fn reconcile_sources(
     Ok((asr.isoforms, asr.loci, recon))
 }
 
+/// Counts reported by [`augment_sources`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AugmentStats {
+    /// Genes in the input gene-model GFF3 (every one is emitted).
+    pub input_genes: usize,
+    /// mRNAs in the input gene-model GFF3 (every one is emitted verbatim).
+    pub input_mrnas: usize,
+    /// Isoform mRNAs appended: output mRNAs minus input mRNAs.
+    pub appended: usize,
+}
+
+/// `assemble --models`: analyze the transcript sources (assembly + alt-splice), load an
+/// existing gene-model GFF3, and append each gene's genuine alternative isoforms as extra
+/// mRNAs, the input genes kept verbatim (see [`crate::consensus::altsplice::augment`]).
+/// Returns the output genes, the region-tagged alt-splice events and the counts.
+pub fn augment_sources(
+    paths: &[PathBuf],
+    models: &Path,
+    genome: &Path,
+    fuzzlength: i64,
+    min_overlap_frac: f64,
+    filters: &Filters,
+    code: GeneticCode,
+) -> Result<(Vec<OutGene>, Vec<EventRecord>, AugmentStats)> {
+    let asr = analyze_sources(paths, fuzzlength, min_overlap_frac, filters)?;
+    let models = crate::io::gene_models::load_gene_models(models)?;
+    let mrnas = |genes: &[OutGene]| genes.iter().map(|g| g.transcripts.len()).sum::<usize>();
+    let (input_genes, input_mrnas) = (models.len(), mrnas(&models));
+    let genome = Fasta::load(genome)?;
+    let (genes, events) = crate::consensus::altsplice::augment(models, asr, &genome, &code);
+    let stats = AugmentStats {
+        input_genes,
+        input_mrnas,
+        appended: mrnas(&genes) - input_mrnas,
+    };
+    Ok((genes, events, stats))
+}
+
 /// Configuration for the EVM-style `consensus` path.
 pub struct ConsensusConfig {
     pub weights: PathBuf,

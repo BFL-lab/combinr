@@ -58,8 +58,9 @@ pub struct CommonOpts {
 pub enum Command {
     /// Combine transcript sources into a non-redundant assembly set. Add
     /// `--alt-splice` to also classify alternative-splicing events between the
-    /// isoforms, or `--gene-pred` + `--genome` to reconcile an external CDS onto
-    /// the isoforms for CDS + 5'/3' UTRs.
+    /// isoforms, `--gene-pred` + `--genome` to reconcile an external CDS onto
+    /// the isoforms for CDS + 5'/3' UTRs, or `--models` + `--genome` to append the
+    /// alternative isoforms to an existing gene set kept unchanged.
     Assemble(AssembleArgs),
 
     /// Build consensus gene models by integrating weighted evidence (EVM-style).
@@ -86,10 +87,12 @@ pub struct AssembleInputs {
 }
 
 /// Optional inputs that switch `assemble` from plain non-redundant assembly into
-/// the CDS/UTR reconcile step. Both must be given together (or neither); they are
-/// not part of the default transcript-combining behavior.
+/// the CDS/UTR reconcile step (--gene-pred) or into augmenting an existing gene set
+/// (--models). Either needs --genome, and --genome needs one of them; they are not part
+/// of the default transcript-combining behavior.
 #[derive(Parser, Debug)]
-#[command(next_help_heading = "CDS/UTR reconcile (optional)")]
+#[command(next_help_heading = "CDS/UTR reconcile & model augmentation (optional)")]
+#[command(group = clap::ArgGroup::new("anchor").args(["gene_pred", "models"]))]
 pub struct AssembleReconcile {
     /// Gene-prediction GFF3 with mapped CDS. Supplying this (together with
     /// --genome) grafts the prediction's CDS onto each assembled isoform to add
@@ -97,9 +100,20 @@ pub struct AssembleReconcile {
     /// --genome.
     #[arg(long, requires = "genome")]
     pub gene_pred: Option<PathBuf>,
-    /// Genome FASTA, read for codon/UTR sequence during the reconcile step.
-    /// Required with, and only used by, --gene-pred.
-    #[arg(long, requires = "gene_pred")]
+    /// Gene-model GFF3 (gene/mRNA/exon/CDS[/UTR]) to keep unchanged and augment. Every
+    /// input gene and mRNA is emitted as-is (structure, IDs, attributes); each assembled
+    /// transcript isoform that overlaps a gene on its strand, hosts the gene's CDS start
+    /// and is a genuine alternative (a novel splice junction — not a CDS-identical
+    /// structure or a mere terminal truncation of any existing mRNA) is appended as an
+    /// extra mRNA of that gene, with the gene's CDS grafted on (inherited when the
+    /// structure matches, re-projected from the same start codon when it diverges).
+    /// Isoforms overlapping no model are dropped. Requires --genome; mutually exclusive
+    /// with --gene-pred.
+    #[arg(long, requires = "genome", conflicts_with = "gene_pred")]
+    pub models: Option<PathBuf>,
+    /// Genome FASTA, read for codon/UTR sequence during the reconcile / augmentation
+    /// step. Required with, and only used by, --gene-pred or --models.
+    #[arg(long, requires = "anchor")]
     pub genome: Option<PathBuf>,
 }
 
@@ -107,16 +121,16 @@ pub struct AssembleReconcile {
 #[command(next_help_heading = "Pipeline behavior")]
 pub struct AssemblePipeline {
     /// Classify alternative-splicing events between isoforms and write them to
-    /// `--events`. Superseded by the reconcile step when --gene-pred/--genome are
-    /// given (which emits region-tagged events anyway). Off by default.
+    /// `--events`. Superseded by the reconcile / augmentation step when --gene-pred or
+    /// --models is given (which emits region-tagged events anyway). Off by default.
     #[arg(long)]
     pub alt_splice: bool,
     /// Path for the tab-separated alt-splice event report (written by
-    /// `--alt-splice` or the --gene-pred/--genome reconcile step).
+    /// `--alt-splice` or the --gene-pred / --models step).
     #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
     pub events: PathBuf,
-    /// NCBI genetic code for the reconcile step's stop-codon detection (only used
-    /// with --gene-pred). Supported: NCBI tables 1-6, 9-16, 21-33.
+    /// NCBI genetic code for the reconcile / augmentation step's stop-codon detection
+    /// (only used with --gene-pred or --models). Supported: NCBI tables 1-6, 9-16, 21-33.
     #[arg(short = 'g', long = "genetic-code", default_value_t = 1)]
     pub genetic_code: u32,
 }

@@ -10,7 +10,10 @@ the consolidation they perform:
 
 - **`assemble`** — PASA: merge compatible transcript alignments into non-redundant isoforms
   (keeps alternatives). `--alt-splice` also groups into loci and classifies alt-splice
-  events; `--gene-pred --genome` grafts an external CDS onto isoforms for CDS/UTR. (The
+  events; `--gene-pred --genome` grafts an external CDS onto isoforms for CDS/UTR;
+  `--models --genome` keeps an existing gene-model GFF3 verbatim (`io::gene_models`) and
+  appends its genuine alternative isoforms as extra mRNAs (`consensus::altsplice::augment`,
+  sharing the alt-isoform predicate with `consensus --alt-splice`). (The
   former standalone `altsplice` / `run` / `orf` subcommands are all folded into `assemble`
   now — the `src/altsplice/` and `src/orf/` libraries stay; `pipeline::analyze_sources` /
   `reconcile_sources` are the entry points.)

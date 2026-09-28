@@ -9,10 +9,12 @@ pub fn write<W: Write>(w: &mut W, genes: &[OutGene]) -> io::Result<()> {
     writeln!(w, "##gff-version 3")?;
     for gene in genes {
         let strand = strand_char(gene.strand);
+        let mut attrs = format!("ID={}", gene.gene_id);
+        push_attrs(&mut attrs, &gene.attrs);
         writeln!(
             w,
-            "{}\tcombinr\tgene\t{}\t{}\t.\t{strand}\t.\tID={}",
-            gene.contig, gene.lend, gene.rend, gene.gene_id
+            "{}\tcombinr\tgene\t{}\t{}\t.\t{strand}\t.\t{attrs}",
+            gene.contig, gene.lend, gene.rend
         )?;
         for t in &gene.transcripts {
             write_transcript(w, &gene.gene_id, t)?;
@@ -30,10 +32,7 @@ fn write_transcript<W: Write>(w: &mut W, gene_id: &str, t: &OutTranscript) -> io
     let tid = &t.transcript_id;
 
     let mut attrs = format!("ID={tid};Parent={gene_id}");
-    for (k, vals) in &t.attrs {
-        let v = vals.iter().map(|s| escape(s)).collect::<Vec<_>>().join(",");
-        let _ = write!(attrs, ";{k}={v}");
-    }
+    push_attrs(&mut attrs, &t.attrs);
     writeln!(
         w,
         "{}\tcombinr\tmRNA\t{lend}\t{rend}\t.\t{strand}\t.\t{attrs}",
@@ -51,7 +50,7 @@ fn write_transcript<W: Write>(w: &mut W, gene_id: &str, t: &OutTranscript) -> io
     }
     if !t.cds.is_empty() {
         write_utr(w, t, "five_prime_UTR", &t.five_utr)?;
-        let phases = cds_phases(&t.cds, t.strand);
+        let phases = cds_phases(&t.cds, t.strand, t.cds_start_phase);
         for (k, seg) in t.cds.iter().enumerate() {
             let phase = phases[&(seg.lend, seg.rend)];
             writeln!(
@@ -66,6 +65,14 @@ fn write_transcript<W: Write>(w: &mut W, gene_id: &str, t: &OutTranscript) -> io
         write_utr(w, t, "three_prime_UTR", &t.three_utr)?;
     }
     Ok(())
+}
+
+/// Append `;key=v1,v2` for each attribute, values escaped (the inverse of [`unescape`]).
+fn push_attrs(out: &mut String, attrs: &[(String, Vec<String>)]) {
+    for (k, vals) in attrs {
+        let v = vals.iter().map(|s| escape(s)).collect::<Vec<_>>().join(",");
+        let _ = write!(out, ";{k}={v}");
+    }
 }
 
 fn write_utr<W: Write>(
@@ -107,6 +114,32 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// Decode a percent-encoded GFF3 column-9 value: the exact inverse of [`escape`].
+/// Every `%XX` (two hex digits) decodes to its byte; a `%` not followed by two hex
+/// digits is kept literally.
+pub(crate) fn unescape(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +176,39 @@ mod tests {
         assert!(out.contains("num_contained=2"));
         assert!(out.contains("\texon\t100\t200\t"));
         assert!(out.contains("\texon\t300\t450\t"));
+    }
+
+    #[test]
+    fn unescape_inverts_escape() {
+        for v in [
+            "plain",
+            "a;b=c&d,e\tf\ng%h",
+            "%3B literal",
+            "100%",
+            "%zz",
+            "ünïcode;",
+            "",
+        ] {
+            assert_eq!(unescape(&escape(v)), v, "round-trip of {v:?}");
+        }
+        assert_eq!(unescape("a%3Bb%2Cc%25"), "a;b,c%");
+        assert_eq!(unescape("100%"), "100%");
+    }
+
+    #[test]
+    fn gene_attrs_follow_id() {
+        let genes = vec![OutGene {
+            gene_id: "g1".into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            lend: 1,
+            rend: 10,
+            attrs: vec![("Name".into(), vec!["x;y".into(), "z".into()])],
+            transcripts: vec![],
+        }];
+        let mut buf = Vec::new();
+        write(&mut buf, &genes).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("\tgene\t1\t10\t.\t+\t.\tID=g1;Name=x%3By,z\n"));
     }
 }

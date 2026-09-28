@@ -14,7 +14,10 @@ specifically GTF, GFF3, or BAM.
    (`assemble --alt-splice`: retained intron, alternate donor/acceptor,
    transcription-start / polyA within an intron, exon skipping, alternate terminal
    exons); `assemble --gene-pred --genome` additionally reconciles an external
-   gene-prediction CDS onto the isoforms to derive CDS + 5'/3' UTRs.
+   gene-prediction CDS onto the isoforms to derive CDS + 5'/3' UTRs, and
+   `assemble --models --genome` augments an existing gene-model set (e.g. a
+   `consensus` output), kept unchanged, with its alternatively spliced isoforms as
+   extra mRNAs.
 3. **Build consensus gene models** (`consensus`) by integrating *weighted*
    heterogeneous evidence (ab-initio gene predictions, protein alignments,
    transcript alignments) into one best-scoring coding gene structure per locus,
@@ -152,6 +155,17 @@ combinr consensus --weights weights.txt --genome genome.fa \
     --gene-predictions abinitio.gff3 \
     --protein-alignments proteins.gff3 \
     --transcript-alignments transcripts.gff3 > consensus.gff3
+
+# 4b) Consensus models plus each locus's alternative transcript isoforms as extra mRNAs
+combinr consensus --weights weights.txt --genome genome.fa \
+    --gene-predictions abinitio.gff3 \
+    --protein-alignments proteins.gff3 \
+    --transcript-alignments transcripts.gff3 \
+    --alt-splice --events events.tsv > consensus_isoforms.gff3
+
+# 5) Keep an existing gene set unchanged and append its alternatively spliced isoforms
+combinr assemble -i rnaseq.bam --models consensus.gff3 --genome genome.fa \
+    --events events.tsv > augmented.gff3
 ```
 
 `consensus` options: `--strict` (drop low-support genes instead of flagging),
@@ -194,7 +208,13 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
   resolved during assembly). CRAM and plain-text SAM are not supported.
 - **Gene-prediction GFF3** (`--gene-pred`, the `assemble` reconcile step only): `CDS`
   rows grouped by mRNA `Parent`.
-- **Genome FASTA** (`--genome`, the `assemble` reconcile step and `consensus`).
+- **Gene-model GFF3** (`--models`, `assemble` model augmentation only): a gene set to
+  keep unchanged, as `gene` / `mRNA` (or `transcript`) / `exon` / `CDS` /
+  `five_prime_UTR` / `three_prime_UTR` rows linked by `Parent=` (e.g. a `consensus`
+  output). Missing `gene`/`mRNA` rows are synthesized from their children and missing
+  exons from CDS ∪ UTRs; rows of other feature types (tRNA, ncRNA, …) are ignored.
+- **Genome FASTA** (`--genome`, the `assemble` reconcile / augmentation step and
+  `consensus`).
 - **Consensus evidence** (`consensus`): a `--weights` file (three whitespace columns
   `CLASS TYPE WEIGHT`, where `CLASS` is `PROTEIN`/`TRANSCRIPT`/`ABINITIO_PREDICTION`/
   `OTHER_PREDICTION` and `TYPE` matches the GFF column-2 source) plus the evidence GFF3s:
@@ -207,6 +227,18 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
   `CDS`/`five_prime_UTR`/`three_prime_UTR` when the ORF step runs) or GTF
   (`--format gtf`). Each transcript carries `sources=` (provenance) and
   `contains=` (contributing accessions).
+- **Augmented gene set** (`assemble --models`): every input gene and mRNA in input
+  order, then, per gene, each assembled isoform that hosts the gene's CDS start and is
+  a genuine alternative (a novel splice junction; not CDS-identical to, nor a mere
+  terminal truncation of, any of the gene's mRNAs) as an extra mRNA
+  `{gene_id}.iso{n}` tagged `support=transcript_isoform`, with the gene's CDS grafted
+  on (from its longest-CDS mRNA) and `coding_altered`/`partial3`/`sources`/`contains`.
+  Isoforms overlapping no gene are dropped. **Preserved** from the input: gene and mRNA
+  IDs, exon/CDS/UTR structure, gene and mRNA attributes (percent-decoded on read,
+  re-encoded on write), and each CDS's 5' phase. **Regenerated**: exon/CDS/UTR row IDs
+  (`{mRNA}.exon1`, …), column 2 (`combinr`), CDS phases (recomputed from the 5' phase),
+  and the gene span, which is only ever widened to cover appended isoforms. Events go
+  to `--events` as in the reconcile step.
 - **Alt-splice event report** as a TSV (`--events`) with the event type, coords,
   the two isoforms, and after the ORF step, the region (5'UTR / CDS / 3'UTR).
 - **Consensus gene models** (`consensus`) to stdout as GFF3 `gene`/`mRNA`/`exon`/`CDS`

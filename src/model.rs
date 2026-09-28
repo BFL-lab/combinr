@@ -104,6 +104,23 @@ pub fn introns_between(segs: &[Coordset]) -> impl Iterator<Item = Coordset> + '_
     segs.windows(2).map(|w| w[0].gap_to(&w[1]))
 }
 
+/// Merge overlapping or directly adjacent segments (sorted, coalesced).
+pub fn merge_coords(mut segs: Vec<Coordset>) -> Vec<Coordset> {
+    segs.sort_by_key(|c| (c.lend, c.rend));
+    let mut out: Vec<Coordset> = Vec::new();
+    for s in segs {
+        match out.last_mut() {
+            Some(last) if s.lend <= last.rend + 1 => {
+                if s.rend > last.rend {
+                    last.rend = s.rend;
+                }
+            }
+            _ => out.push(s),
+        }
+    }
+    out
+}
+
 /// Transcribed / aligned orientation.
 ///
 /// `Unknown` corresponds to PASA's `?` (and GFF/GTF `.`): an alignment whose

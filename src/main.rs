@@ -15,8 +15,8 @@ use combinr::io::out_model::{OutGene, from_annotated_loci, from_assemblies, from
 use combinr::io::{writer_events, writer_gff3, writer_gtf};
 use combinr::pipeline::{
     ConsensusConfig, DEFAULT_MIN_CODING_LENGTH, DEFAULT_RESEARCH_SIZE, analyze_sources,
-    assemble_sources, consensus_sources, consensus_with_isoforms, parse_genetic_code,
-    reconcile_sources,
+    assemble_sources, augment_sources, consensus_sources, consensus_with_isoforms,
+    parse_genetic_code, reconcile_sources,
 };
 use combinr::token::parse_tokens;
 
@@ -42,7 +42,8 @@ fn init_threads(threads: usize) {
 /// `assemble`: the PASA driver. Bare emits a non-redundant assembly set; `--alt-splice`
 /// also groups into loci and classifies alternative-splicing events; `--gene-pred`
 /// with `--genome` reconciles an external CDS onto the isoforms for CDS + 5'/3' UTRs
-/// (the former `orf`/`run` step).
+/// (the former `orf`/`run` step); `--models` with `--genome` appends the alternative
+/// isoforms to an existing gene set emitted unchanged.
 fn run_assemble(a: AssembleArgs) -> Result<()> {
     init_threads(a.common.threads);
     let fmt = a.common.format;
@@ -56,10 +57,11 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
         max_intron: a.tuning.max_intron.filter(|&n| n > 0),
     };
 
-    match (a.reconcile.gene_pred, a.reconcile.genome) {
+    let r = a.reconcile;
+    match (r.gene_pred, r.models, r.genome) {
         // CDS/UTR reconcile: graft an external prediction's CDS onto the isoforms.
         // Supersedes --alt-splice; the reconcile path emits region-tagged events too.
-        (Some(gene_pred), Some(genome)) => {
+        (Some(gene_pred), None, Some(genome)) => {
             let code = parse_genetic_code(a.pipeline.genetic_code)?;
             let (isoforms, loci, recon) = reconcile_sources(
                 &a.inputs.input,
@@ -88,8 +90,34 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
             );
             Ok(())
         }
+        // Model augmentation: keep an input gene set verbatim and append each gene's
+        // genuine alternative isoforms. Also supersedes --alt-splice.
+        (None, Some(models), Some(genome)) => {
+            let code = parse_genetic_code(a.pipeline.genetic_code)?;
+            let (genes, events, stats) = augment_sources(
+                &a.inputs.input,
+                &models,
+                &genome,
+                fuzz,
+                overlap,
+                &filters,
+                code,
+            )
+            .with_context(|| "augmenting gene models")?;
+            write_models(&genes, fmt, output.as_deref())?;
+            write_events_file(&events, &a.pipeline.events)?;
+            eprintln!(
+                "combinr: {} input gene(s) / {} mRNA(s); {} appended isoform mRNA(s); {} event(s) -> {}",
+                stats.input_genes,
+                stats.input_mrnas,
+                stats.appended,
+                events.len(),
+                a.pipeline.events.display()
+            );
+            Ok(())
+        }
         // Alt-splice classification only.
-        (None, None) if a.pipeline.alt_splice => {
+        (None, None, None) if a.pipeline.alt_splice => {
             let r = analyze_sources(&a.inputs.input, fuzz, overlap, &filters)
                 .with_context(|| "analyzing alt-splicing")?;
             let genes = from_loci(&r.isoforms, &r.loci);
@@ -105,7 +133,7 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
             Ok(())
         }
         // Bare assembly: non-redundant set, no events.
-        (None, None) => {
+        (None, None, None) => {
             let assemblies = assemble_sources(&a.inputs.input, fuzz, overlap, &filters)
                 .with_context(|| "assembling input sources")?;
             let genes = from_assemblies(&assemblies);
@@ -117,9 +145,9 @@ fn run_assemble(a: AssembleArgs) -> Result<()> {
             );
             Ok(())
         }
-        // --gene-pred and --genome are paired by clap `requires`, so a lone one
-        // never reaches here.
-        _ => unreachable!("--gene-pred and --genome are paired by clap `requires`"),
+        // clap enforces the rest: --gene-pred/--models each require --genome, --genome
+        // requires one of them (the `anchor` group), and the two conflict.
+        _ => unreachable!("--gene-pred/--models/--genome combinations are validated by clap"),
     }
 }
 
