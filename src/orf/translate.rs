@@ -95,7 +95,7 @@ impl GeneticCode {
 
     /// `true` if `codon` (3 uppercase bytes) is a stop under this code.
     pub fn is_stop(&self, codon: &[u8]) -> bool {
-        self.stops.iter().any(|&s| s == codon)
+        self.stops.contains(&codon)
     }
 }
 
