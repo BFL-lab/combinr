@@ -360,13 +360,15 @@ impl Builder<'_> {
             if unmasked <= 0 {
                 continue;
             }
+            let key = (intron.lend, intron.rend);
+            self.introns.add(key, chain.weight, unmasked);
             self.introns
-                .add((intron.lend, intron.rend), chain.weight, unmasked);
+                .attribute(key, &chain.accession, &chain.ev_type);
         }
     }
 }
 
-fn position_type(i: usize, n: usize) -> ExonType {
+pub(crate) fn position_type(i: usize, n: usize) -> ExonType {
     if n == 1 {
         ExonType::Single
     } else if i == 0 {
@@ -457,6 +459,34 @@ mod tests {
         // one evidence-supported intron, scored weight*unmasked_len = 1*31
         assert!(rd.introns.contains((19, 49)));
         assert_eq!(rd.introns.score((19, 49)), Some(31.0));
+        assert_eq!(
+            rd.introns.evidence((19, 49)),
+            &[("acc".to_string(), "src".to_string())]
+        );
+    }
+
+    #[test]
+    fn intron_evidence_lists_each_chain_once() {
+        // three chains share intron 19..49: "acc"/"src" twice (deduped) and a second
+        // accession; the score still accumulates all three.
+        let g = genome(70, &[(56, b"TAA")]);
+        let mut other = chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)]);
+        other.accession = "acc2".into();
+        let chains = vec![
+            chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)]),
+            chain(EvClass::Transcript, 1.0, &[(1, 18), (50, 60)]),
+            other,
+        ];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert_eq!(rd.introns.score((19, 49)), Some(93.0));
+        assert_eq!(
+            rd.introns.evidence((19, 49)),
+            &[
+                ("acc".to_string(), "src".to_string()),
+                ("acc2".to_string(), "src".to_string())
+            ]
+        );
+        assert!(rd.introns.evidence((1, 5)).is_empty());
     }
 
     #[test]

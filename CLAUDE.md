@@ -60,7 +60,9 @@ peak augmentation via `peaks`) → `grammar` + `trellis` (the gene-structure DP:
 reverse-complement-then-transpose; tail/intergenic/long-intron recursion; CDS/UTR
 projection) → `filter` (flag-not-drop low-support) → `output` (→ `OutGene`). `repeats`
 parses the optional mask (sorted + merged per contig; `pipeline` hands each region only the
-intervals overlapping it via `repeats::overlapping`).
+intervals overlapping it via `repeats::overlapping`). `report` writes the opt-in
+`--evidence-report` (`.evm.out`-style per-exon/intron `{accession;source}` lines from
+`CalledGene.features`; gene IDs via `output::ordered_with_ids`, shared with the GFF3 paths).
 
 ## Deliberate divergences from EVM (don't "fix" these)
 

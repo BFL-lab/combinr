@@ -11,6 +11,7 @@
 
 use crate::altsplice::{AltSpliceResult, EventRecord, Isoform};
 use crate::consensus::engine::CalledGene;
+use crate::consensus::output::ordered_with_ids;
 use crate::io::fasta::Fasta;
 use crate::io::out_model::{OutGene, OutTranscript};
 use crate::model::{Coordset, Strand, introns_between};
@@ -26,16 +27,15 @@ pub fn annotate(
     genome: &Fasta,
     code: &GeneticCode,
 ) -> (Vec<OutGene>, Vec<EventRecord>) {
-    // deterministic output order + gene ids
-    let mut order: Vec<usize> = (0..genes.len()).collect();
-    order.sort_by(|&a, &b| gkey(&genes[a]).cmp(&gkey(&genes[b])));
+    // deterministic output order + gene ids (shared with `to_out_genes` and the report)
+    let order = ordered_with_ids(genes);
 
     // each consensus gene -> a CdsModel id'd by its output rank
     let mut models = Vec::new();
-    let mut model_id_for: Vec<Option<String>> = vec![None; genes.len()];
-    for (rank, &gi) in order.iter().enumerate() {
-        if let Some(m) = to_cds_model(&genes[gi], format!("cons{rank}")) {
-            model_id_for[gi] = Some(m.id.clone());
+    let mut model_id_for: Vec<Option<String>> = vec![None; order.len()];
+    for (rank, (_, g)) in order.iter().enumerate() {
+        if let Some(m) = to_cds_model(g, format!("cons{rank}")) {
+            model_id_for[rank] = Some(m.id.clone());
             models.push(m);
         }
     }
@@ -46,9 +46,7 @@ pub fn annotate(
     let iso_introns: Vec<Vec<Coordset>> = asr.isoforms.iter().map(|iso| iso.introns()).collect();
 
     let mut out_genes = Vec::with_capacity(order.len());
-    for (rank, &gi) in order.iter().enumerate() {
-        let g = &genes[gi];
-        let gene_id = format!("consensus.{}.g{}", g.contig, rank + 1);
+    for (rank, (gene_id, g)) in order.into_iter().enumerate() {
         // The consensus CDS introns, computed once per gene and reused by the
         // truncation test and UTR salvage below.
         let cds_introns = seg_introns(&g.cds);
@@ -62,7 +60,7 @@ pub fn annotate(
         // (Dropping the spurious truncation mRNAs mirrors PASA subsuming a contained
         // alignment and EVM never minting a terminal exon at a truncation point.)
         let mut alt_isoforms: Vec<(&Isoform, &CodingAnnotation)> = Vec::new();
-        if let Some(mid) = &model_id_for[gi] {
+        if let Some(mid) = &model_id_for[rank] {
             for (idx, iso) in asr.isoforms.iter().enumerate() {
                 let Some(ann) = recon.isoform_codings[idx]
                     .iter()
@@ -404,11 +402,6 @@ fn iso_mrna(iso: &Isoform, ann: &CodingAnnotation, gene_id: &str, n: usize) -> O
     }
 }
 
-fn gkey(g: &CalledGene) -> (String, i64, i64, char) {
-    let (lend, rend) = g.span();
-    (g.contig.clone(), lend, rend, g.orient.to_char())
-}
-
 fn span_of(transcripts: &[OutTranscript]) -> (i64, i64) {
     let lend = transcripts
         .iter()
@@ -459,11 +452,14 @@ mod tests {
             partial3: false,
             score: 100.0,
             support: SupportFlags {
+                raw_noncoding: 0.0,
+                noncoding_equivalent: 0.0,
                 score_ratio: 5.0,
                 coding_length: 60,
                 low_support: false,
             },
             promoted: false,
+            features: vec![],
         }
     }
 

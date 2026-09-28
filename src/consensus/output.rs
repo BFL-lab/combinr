@@ -39,8 +39,11 @@ pub(crate) fn consensus_core_attrs(g: &CalledGene) -> Vec<(String, Vec<String>)>
     ]
 }
 
-/// Convert called genes to output genes, sorted deterministically by position.
-pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
+/// The deterministic output order and gene IDs: sorted by `(contig, lend, rend, strand)`
+/// (stable), with ID `consensus.{contig}.g{rank}` (1-based, numbered across all contigs).
+/// The single source for the GFF3/GTF renderers (default and `--alt-splice`) and the
+/// evidence report, so their gene IDs agree by construction.
+pub fn ordered_with_ids(genes: &[CalledGene]) -> Vec<(String, &CalledGene)> {
     let mut order: Vec<&CalledGene> = genes.iter().collect();
     order.sort_by(|a, b| {
         let (al, ar) = a.span();
@@ -52,12 +55,18 @@ pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
             b.orient.to_char(),
         ))
     });
-
     order
         .into_iter()
         .enumerate()
-        .map(|(i, g)| {
-            let gene_id = format!("consensus.{}.g{}", g.contig, i + 1);
+        .map(|(i, g)| (format!("consensus.{}.g{}", g.contig, i + 1), g))
+        .collect()
+}
+
+/// Convert called genes to output genes, sorted deterministically by position.
+pub fn to_out_genes(genes: &[CalledGene]) -> Vec<OutGene> {
+    ordered_with_ids(genes)
+        .into_iter()
+        .map(|(gene_id, g)| {
             let (lend, rend) = g.span();
             let mut attrs = consensus_core_attrs(g);
             // Tag only promoted genes, so default consensus output is unchanged.

@@ -251,6 +251,12 @@ pub struct ConsensusBehavior {
     /// Path for the alt-splice events TSV (used with `--alt-splice`).
     #[arg(long, default_value = "combinr.alt_splice_events.tsv")]
     pub events: PathBuf,
+    /// Also write a per-gene evidence report (EVidenceModeler `.evm.out` style): for
+    /// every consensus gene, a header line with its GFF3 ID and scores, then one line per
+    /// exon and per intron listing the evidence features `{accession;source}` that
+    /// support it.
+    #[arg(long, value_name = "FILE")]
+    pub evidence_report: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]

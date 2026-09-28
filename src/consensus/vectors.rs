@@ -124,11 +124,14 @@ impl RegionVectors {
     }
 }
 
-/// Evidence-supported introns, keyed by `(intron_lend, intron_rend)` in forward genomic
-/// coordinates (the gap between two exons). Ports EVM's `%INTRONS_TO_SCORE`.
+/// Evidence-supported introns, keyed by `(intron_lend, intron_rend)` in the strand pass's
+/// working coordinates (forward, or RC-local for the minus pass): the gap between two
+/// exons. Ports EVM's `%INTRONS_TO_SCORE`, plus the per-intron `(accession, ev_type)`
+/// attribution the evidence report lists.
 #[derive(Default)]
 pub struct IntronScores {
     score: HashMap<(i64, i64), f64>,
+    evidence: HashMap<(i64, i64), Vec<(String, String)>>,
 }
 
 impl IntronScores {
@@ -136,6 +139,20 @@ impl IntronScores {
     /// `weight * unmasked_len` added to the intron's score.
     pub fn add(&mut self, intron: (i64, i64), weight: f64, unmasked_len: i64) {
         *self.score.entry(intron).or_default() += weight * unmasked_len as f64;
+    }
+
+    /// Record that the chain `(accession, ev_type)` supports `intron` (deduped, in
+    /// insertion order).
+    pub fn attribute(&mut self, intron: (i64, i64), accession: &str, ev_type: &str) {
+        let ev = self.evidence.entry(intron).or_default();
+        if !ev.iter().any(|(a, t)| a == accession && t == ev_type) {
+            ev.push((accession.to_string(), ev_type.to_string()));
+        }
+    }
+
+    /// The `(accession, ev_type)` pairs supporting `intron` (empty if none recorded).
+    pub fn evidence(&self, intron: (i64, i64)) -> &[(String, String)] {
+        self.evidence.get(&intron).map_or(&[], Vec::as_slice)
     }
 
     pub fn score(&self, intron: (i64, i64)) -> Option<f64> {

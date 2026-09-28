@@ -9,25 +9,37 @@
 //! `support=transcript_orf`, **superseding** any both-partial stub there. Loci already
 //! covered by a real (non-both-partial) consensus gene are left for the full alt-isoform
 //! integration (Phase 2).
+//!
+//! Evidence report: a promoted gene's features are its CDS segments (exon rows, typed by
+//! position, EVM frames) and the gaps between them (intron rows). The PASA assembly path
+//! does not track per-feature attribution, so EVERY feature of a promoted gene lists all
+//! of the isoform's contained accessions, each paired with its GFF column-2 source
+//! (`"transcript"` when the accession is not among the loaded transcript chains).
 
 use crate::altsplice::{AltSpliceResult, Isoform, Locus};
-use crate::consensus::engine::CalledGene;
+use crate::consensus::candidates::position_type;
+use crate::consensus::engine::{CalledGene, FeatureKind, FeatureSupport};
+use crate::consensus::exon::end_frame_for;
 use crate::consensus::filter::SupportFlags;
 use crate::io::fasta::Fasta;
+use crate::model::{Coordset, Strand};
 use crate::orf::GeneticCode;
 use crate::orf::coords::SplicedTranscript;
 use crate::orf::find_longest_orf;
+use std::collections::HashMap;
 
 /// Find transcript-ORF genes for uncovered loci and merge them with the trellis genes,
-/// dropping the both-partial stubs they supersede.
+/// dropping the both-partial stubs they supersede. `sources` maps a transcript accession
+/// to its GFF column-2 source, for the evidence attribution.
 pub fn promote_and_merge(
     mut genes: Vec<CalledGene>,
     asr: &AltSpliceResult,
     genome: &Fasta,
     code: &GeneticCode,
     min_coding_length: i64,
+    sources: &HashMap<String, String>,
 ) -> Vec<CalledGene> {
-    let promoted = recover_transcript_loci(&genes, asr, genome, code, min_coding_length);
+    let promoted = recover_transcript_loci(&genes, asr, genome, code, min_coding_length, sources);
     if promoted.is_empty() {
         return genes;
     }
@@ -53,6 +65,7 @@ fn recover_transcript_loci(
     genome: &Fasta,
     code: &GeneticCode,
     min_coding_length: i64,
+    sources: &HashMap<String, String>,
 ) -> Vec<CalledGene> {
     let mut out = Vec::new();
     for locus in &asr.loci {
@@ -71,7 +84,7 @@ fn recover_transcript_loci(
         let best = locus
             .isoform_indices
             .iter()
-            .filter_map(|&i| orf_gene(&asr.isoforms[i], genome, code, min_coding_length))
+            .filter_map(|&i| orf_gene(&asr.isoforms[i], genome, code, min_coding_length, sources))
             .max_by_key(|g| g.support.coding_length);
         if let Some(g) = best {
             out.push(g);
@@ -86,6 +99,7 @@ fn orf_gene(
     genome: &Fasta,
     code: &GeneticCode,
     min_coding_length: i64,
+    sources: &HashMap<String, String>,
 ) -> Option<CalledGene> {
     let st = SplicedTranscript::new(&iso.exons, iso.strand);
     let seq = st.sequence(genome, &iso.contig)?;
@@ -98,6 +112,15 @@ fn orf_gene(
     if cds.is_empty() {
         return None;
     }
+    let evidence: Vec<(String, String)> = iso
+        .contained_accs
+        .iter()
+        .map(|acc| {
+            let src = sources.get(acc).map_or("transcript", String::as_str);
+            (acc.clone(), src.to_string())
+        })
+        .collect();
+    let features = cds_features(&cds, iso.strand, &evidence);
     Some(CalledGene {
         contig: iso.contig.clone(),
         orient: iso.strand,
@@ -109,12 +132,66 @@ fn orf_gene(
         partial3: !orf.has_stop,
         score: coding_length as f64,
         support: SupportFlags {
+            // no consensus noncoding baseline: 0.0 placeholder (never printed — the
+            // report writes NA for promoted genes; 0.0 keeps CalledGene: PartialEq sane)
+            raw_noncoding: 0.0,
+            noncoding_equivalent: 0.0,
             score_ratio: f64::INFINITY, // no consensus noncoding to compare against
             coding_length,
             low_support: false,
         },
         promoted: true,
+        features,
     })
+}
+
+/// Evidence-report features of a promoted gene: the CDS segments as exon rows (typed by
+/// position in transcription order; EVM frames — the codon position of the segment's 5'
+/// base, `cum % 3 + 1` over the coding bases 5' of it, exactly as the candidate builder
+/// assigns them — plus 3 on the minus strand) and the gaps between them as intron rows,
+/// every row carrying `evidence`. Returned in ascending `lend` order.
+fn cds_features(
+    cds: &[Coordset],
+    strand: Strand,
+    evidence: &[(String, String)],
+) -> Vec<FeatureSupport> {
+    let mut segs = cds.to_vec();
+    segs.sort_by_key(|c| c.lend);
+    let minus = strand == Strand::Minus;
+    let n = segs.len();
+    let mut features = Vec::with_capacity(2 * n);
+    let mut cum = 0i64;
+    // walk 5'->3' so the type and frame follow transcription order
+    let order: Vec<usize> = if minus {
+        (0..n).rev().collect()
+    } else {
+        (0..n).collect()
+    };
+    for (k, &i) in order.iter().enumerate() {
+        let seg = segs[i];
+        let start_frame = (cum.rem_euclid(3) + 1) as u8;
+        let end_frame = end_frame_for(start_frame, seg.len());
+        let shift = if minus { 3 } else { 0 };
+        features.push(FeatureSupport {
+            coords: seg,
+            kind: FeatureKind::Exon {
+                exon_type: position_type(k, n),
+                start_frame: start_frame + shift,
+                end_frame: end_frame + shift,
+            },
+            evidence: evidence.to_vec(),
+        });
+        cum += seg.len();
+    }
+    for w in segs.windows(2) {
+        features.push(FeatureSupport {
+            coords: w[0].gap_to(&w[1]),
+            kind: FeatureKind::Intron,
+            evidence: evidence.to_vec(),
+        });
+    }
+    features.sort_by_key(|f| f.coords.lend);
+    features
 }
 
 fn is_both_partial(g: &CalledGene) -> bool {
@@ -205,28 +282,103 @@ mod tests {
             partial3,
             score: 100.0,
             support: SupportFlags {
+                raw_noncoding: 0.0,
+                noncoding_equivalent: 0.0,
                 score_ratio: 2.0,
                 coding_length: rend - lend + 1,
                 low_support: false,
             },
             promoted: false,
+            features: vec![],
         }
     }
 
     #[test]
     fn promotes_uncovered_transcript_locus() {
         let (asr, g) = asr_one();
-        let out = promote_and_merge(vec![], &asr, &g, &GeneticCode::default(), 15);
+        let out = promote_and_merge(
+            vec![],
+            &asr,
+            &g,
+            &GeneticCode::default(),
+            15,
+            &HashMap::new(),
+        );
         assert_eq!(out.len(), 1);
         assert!(out[0].promoted);
         assert_eq!(out[0].cds, vec![Coordset::new(10, 30)]);
     }
 
     #[test]
+    fn promoted_gene_features_are_cds_segments_with_transcript_evidence() {
+        let (asr, g) = asr_one();
+        let sources: HashMap<String, String> = [("t1".to_string(), "PASA".to_string())].into();
+        let out = promote_and_merge(vec![], &asr, &g, &GeneticCode::default(), 15, &sources);
+        let ev = vec![("t1".to_string(), "PASA".to_string())];
+        assert_eq!(
+            out[0].features,
+            vec![FeatureSupport {
+                coords: Coordset::new(10, 30),
+                kind: FeatureKind::Exon {
+                    exon_type: crate::consensus::exon::ExonType::Single,
+                    start_frame: 1,
+                    end_frame: 3,
+                },
+                evidence: ev,
+            }]
+        );
+    }
+
+    #[test]
+    fn cds_features_minus_strand_types_frames_and_introns() {
+        // minus CDS 5'->3': 200..209 (10 bp, initial), 100..108 (terminal, cum 10 -> 2)
+        let segs = [Coordset::new(100, 108), Coordset::new(200, 209)];
+        let ev = vec![("t9".to_string(), "transcript".to_string())];
+        let f = cds_features(&segs, Strand::Minus, &ev);
+        let kinds: Vec<(i64, i64, FeatureKind)> = f
+            .iter()
+            .map(|x| (x.coords.lend, x.coords.rend, x.kind))
+            .collect();
+        use crate::consensus::exon::ExonType::{Initial, Terminal};
+        assert_eq!(
+            kinds,
+            vec![
+                (
+                    100,
+                    108,
+                    FeatureKind::Exon {
+                        exon_type: Terminal,
+                        start_frame: 5,
+                        end_frame: 4
+                    }
+                ),
+                (109, 199, FeatureKind::Intron),
+                (
+                    200,
+                    209,
+                    FeatureKind::Exon {
+                        exon_type: Initial,
+                        start_frame: 4,
+                        end_frame: 4
+                    }
+                ),
+            ]
+        );
+        assert!(f.iter().all(|x| x.evidence == ev));
+    }
+
+    #[test]
     fn real_consensus_gene_blocks_promotion() {
         let (asr, g) = asr_one();
         let real = gene(5, 35, false, false); // complete consensus gene over the locus
-        let out = promote_and_merge(vec![real], &asr, &g, &GeneticCode::default(), 15);
+        let out = promote_and_merge(
+            vec![real],
+            &asr,
+            &g,
+            &GeneticCode::default(),
+            15,
+            &HashMap::new(),
+        );
         assert_eq!(out.len(), 1);
         assert!(!out[0].promoted, "real consensus gene blocks promotion");
     }
@@ -235,7 +387,14 @@ mod tests {
     fn both_partial_stub_is_superseded_by_promoted_orf() {
         let (asr, g) = asr_one();
         let stub = gene(12, 28, true, true); // internal-exon-only stub over the locus
-        let out = promote_and_merge(vec![stub], &asr, &g, &GeneticCode::default(), 15);
+        let out = promote_and_merge(
+            vec![stub],
+            &asr,
+            &g,
+            &GeneticCode::default(),
+            15,
+            &HashMap::new(),
+        );
         // the stub is dropped, replaced by the promoted ORF gene
         assert_eq!(out.len(), 1);
         assert!(out[0].promoted);
@@ -248,7 +407,14 @@ mod tests {
         let stub = gene(12, 28, true, true);
         // require 300 nt: the 21 nt ORF doesn't qualify, so nothing is promoted and the
         // stub stays.
-        let out = promote_and_merge(vec![stub], &asr, &g, &GeneticCode::default(), 300);
+        let out = promote_and_merge(
+            vec![stub],
+            &asr,
+            &g,
+            &GeneticCode::default(),
+            300,
+            &HashMap::new(),
+        );
         assert_eq!(out.len(), 1);
         assert!(!out[0].promoted);
     }

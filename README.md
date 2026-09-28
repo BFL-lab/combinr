@@ -166,7 +166,8 @@ find the longest ORF in the transcripts and emit it, tagged `support=transcript_
 `--alt-splice` (also emit each consensus locus's alternative transcript isoforms as extra
 mRNAs, with CDS derived from the consensus (inherited if matching, re-projected from the
 consensus start if divergent) and write a region-tagged alt-splice events TSV to
-`--events`), plus `--repeats <gff3>` (mask repeats from scoring).
+`--events`), plus `--repeats <gff3>` (mask repeats from scoring) and
+`--evidence-report <file>` (also write a per-gene evidence report, see Output).
 
 `assemble` tuning: `--fuzzlength <bp>` (default 20) and the quality filters
 `--min-avg-per-id` and `--min-intron` (off by default) plus `--max-intron`
@@ -211,6 +212,25 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
 - **Consensus gene models** (`consensus`) to stdout as GFF3 `gene`/`mRNA`/`exon`/`CDS`
   with CDS phases (the exon structure is the coding structure). Each mRNA carries
   `score`, `score_ratio`, `coding_length`, `low_support`, and `partial5`/`partial3`.
+- **Consensus evidence report** (`consensus --evidence-report <file>`, EVidenceModeler
+  `.evm.out` style) for screening genes by their support. Two `##` lines describe the
+  format; then per gene a `#` header with its GFF3 gene ID, span, strand, `score`,
+  `noncoding_equivalent`, `raw_noncoding`, `S-ratio`, `coding_length`, `low_support`,
+  `partial5`/`partial3` and `support` (`NA` noncoding fields for promoted
+  transcript-ORF genes), one tab-separated line per exon (`end5 end3 type+strand
+  start_frame end_frame evidence`; frames 1-3 forward, 4-6 reverse; `end5 > end3` on
+  the minus strand) and per intron (`end5 end3 INTRON` + evidence), each listing the
+  supporting evidence as `{accession;source}` (source = GFF column 2), then a blank
+  line. For example:
+
+  ```
+  # consensus.Contig1.g1 Contig1:842-3150 orient(+) score(70050.00) noncoding_equivalent(133.00) raw_noncoding(133.00) S-ratio(526.69) coding_length(948) low_support(false) partial5(false) partial3(false) support(consensus)
+  842	1127	initial+	1	1	{1.m000032;genemark}
+  1128	1482	INTRON			{1.m000032;genemark},{match.gap2.1;gap2-plant_gene_index}
+  ```
+
+  A promoted transcript-ORF gene reports its CDS segments as exons, and every row lists
+  all of its assembled transcripts (the assembly does not track per-feature support).
 
 ## Correctness
 
