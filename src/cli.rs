@@ -216,8 +216,8 @@ pub struct ConsensusTuning {
     /// Coding/noncoding score ratio below which a gene is flagged low-support.
     #[arg(long, default_value_t = 0.75)]
     pub min_score_ratio: f64,
-    /// (--alt-splice only) Require two transcript isoforms' genomic-span overlap to be
-    /// >= this percent of the SHORTER span before they attach to one gene (PASA
+    /// (--alt-splice only) Require two transcript isoforms' genomic-span overlap to be at
+    /// least this percent of the SHORTER span before they attach to one gene (PASA
     /// --stringent_alignment_overlap). 0 = off (the default). The EVM consensus region
     /// partitioner is unaffected.
     #[arg(long, default_value_t = DEFAULT_STRINGENT_OVERLAP)]

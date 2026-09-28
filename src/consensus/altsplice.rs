@@ -9,8 +9,8 @@
 //! that hosts its CDS and is a genuine alternative ([`is_genuine_alternative`]).
 //!
 //! - [`annotate`] (`consensus --alt-splice`): the consensus genes; the consensus mRNA
-//!   also adopts UTRs salvaged from compatible transcripts. Opt-in; the default
-//!   one-model-per-locus output is untouched.
+//!   also adopts UTRs salvaged from compatible transcripts at its complete (non-partial)
+//!   ends. Opt-in; the default one-model-per-locus output is untouched.
 //! - [`augment`] (`assemble --models`): an input gene set, emitted verbatim, with the
 //!   genuine alternatives appended (no UTR salvage, input transcripts untouched).
 
@@ -246,7 +246,8 @@ fn cds_model(
 /// When the base consensus carries no UTRs of its own, it adopts the UTRs assembled
 /// from compatible transcript evidence (`utrs`, from [`salvage_utrs`]): its CDS-only
 /// exon structure is extended with the salvaged 5'/3' UTR segments, and the donor
-/// transcripts' provenance is recorded so the UTR support is traceable.
+/// transcripts' provenance is recorded so the UTR support is traceable. The `utrs`
+/// already honour the gene's partial flags (no UTR at a partial end).
 fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
     // `support` first (always present here), then the six shared consensus attributes.
     let support = if g.promoted {
@@ -260,12 +261,7 @@ fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
     // Adopt the salvaged UTRs only when the base consensus has none of its own; extend
     // the CDS-only exon structure with the UTR segments (merging the UTR that abuts a
     // terminal CDS exon into it, keeping any spliced UTR exon separate).
-    // A CDS that begins mid-codon (`cds_start_phase > 0`) has no UTR room at its 5' end
-    // — this keeps such genes unsalvaged, as when their partial codon was a 5'UTR stub.
-    let use_salvage = g.five_utr.is_empty()
-        && g.three_utr.is_empty()
-        && g.cds_start_phase == 0
-        && !utrs.is_empty();
+    let use_salvage = g.five_utr.is_empty() && g.three_utr.is_empty() && !utrs.is_empty();
     let (exons, five_utr, three_utr) = if use_salvage {
         if !utrs.sources.is_empty() {
             attrs.push(("sources".into(), utrs.sources.clone()));
@@ -390,6 +386,10 @@ fn total_len(segs: &[Coordset]) -> i64 {
 /// start codon, so the start-anchored [`graft`] cannot see it — hence this separate
 /// scan over all isoforms). Only transcripts sharing every junction with the CDS
 /// contribute; genuine alternatives are excluded.
+///
+/// No UTR is salvaged at a partial end (`g.partial5` / `g.partial3`): its CDS bound is an
+/// evidence boundary, not a start/stop codon, so transcript material beyond it is
+/// presumably still coding. The provenance comes only from the donors actually used.
 fn salvage_utrs(
     g: &CalledGene,
     isoforms: &[Isoform],
@@ -423,7 +423,7 @@ fn salvage_utrs(
         if !shares_junctions(&iso.exons, &iso_introns[i], &g.cds, cds_introns) {
             continue;
         }
-        if covers(&iso.exons, start_g) {
+        if !g.partial5 && covers(&iso.exons, start_g) {
             let five = clip_beyond(&iso.exons, start_g, minus);
             let l = total_len(&five);
             if l > best_five {
@@ -432,7 +432,7 @@ fn salvage_utrs(
                 five_donor = Some(iso);
             }
         }
-        if covers(&iso.exons, stop_g) {
+        if !g.partial3 && covers(&iso.exons, stop_g) {
             let three = clip_beyond(&iso.exons, stop_g, !minus);
             let l = total_len(&three);
             if l > best_three {
@@ -606,7 +606,46 @@ mod tests {
     }
 
     #[test]
-    fn mid_codon_cds_start_takes_no_salvaged_utr() {
+    fn salvage_utrs_skips_partial_ends() {
+        // complete CDS 10..40,60..90; one compatible isoform extending beyond both ends
+        let mut g = consensus_gene(&[(10, 40), (60, 90)]);
+        let mut t = iso("t1", &[(1, 40), (60, 99)]);
+        t.source_set.insert("tx".into());
+        let isoforms = vec![t];
+        let iso_introns: Vec<Vec<Coordset>> = isoforms.iter().map(|i| i.introns()).collect();
+        let cds_introns = seg_introns(&g.cds);
+        let salvage = |g: &CalledGene| salvage_utrs(g, &isoforms, &iso_introns, &cds_introns);
+
+        let u = salvage(&g);
+        assert_eq!(u.five, vec![cs(1, 9)]);
+        assert_eq!(u.three, vec![cs(91, 99)]);
+        assert_eq!(u.sources, vec!["tx".to_string()]);
+        assert_eq!(u.contains, vec!["t1".to_string()]);
+
+        // 5'-partial: no 5'UTR, the 3'UTR (and its provenance) kept
+        g.partial5 = true;
+        let u = salvage(&g);
+        assert!(u.five.is_empty());
+        assert_eq!(u.three, vec![cs(91, 99)]);
+        assert_eq!(u.contains, vec!["t1".to_string()]);
+
+        // 3'-partial: the mirror
+        g.partial5 = false;
+        g.partial3 = true;
+        let u = salvage(&g);
+        assert_eq!(u.five, vec![cs(1, 9)]);
+        assert!(u.three.is_empty());
+
+        // both partial: nothing salvaged, no provenance
+        g.partial5 = true;
+        let u = salvage(&g);
+        assert!(u.is_empty());
+        assert!(u.sources.is_empty() && u.contains.is_empty());
+    }
+
+    #[test]
+    fn partial_gene_with_no_salvaged_utr_keeps_its_own_structure() {
+        // a complete gene adopts a non-empty Utrs (unchanged behaviour)
         let mut g = consensus_gene(&[(10, 40), (60, 90)]);
         let utrs = Utrs {
             five: vec![cs(1, 5)],
@@ -614,14 +653,14 @@ mod tests {
             sources: vec![],
             contains: vec![],
         };
-        // phase 0: the salvaged 5'UTR is adopted (unchanged behavior)
         assert_eq!(consensus_mrna(&g, "g1", &utrs).five_utr, vec![cs(1, 5)]);
-        // a 5'-partial CDS starting mid-codon keeps its own (empty) UTRs and phase
+        // a phase-2 5'-partial gene, given the (empty) Utrs salvage_utrs yields for it,
+        // keeps its own exons, no UTRs and its phase
         g.partial5 = true;
         g.cds_start_phase = 2;
-        let m = consensus_mrna(&g, "g1", &utrs);
-        assert!(m.five_utr.is_empty());
-        assert_eq!(m.exons, vec![cs(10, 40), cs(60, 90)]);
+        let m = consensus_mrna(&g, "g1", &Utrs::default());
+        assert_eq!(m.exons, g.exons);
+        assert!(m.five_utr.is_empty() && m.three_utr.is_empty());
         assert_eq!(m.cds_start_phase, 2);
     }
 

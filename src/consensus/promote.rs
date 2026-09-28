@@ -17,9 +17,8 @@
 //! (`"transcript"` when the accession is not among the loaded transcript chains).
 
 use crate::altsplice::{AltSpliceResult, Isoform, Locus};
-use crate::consensus::candidates::position_type;
 use crate::consensus::engine::{CalledGene, FeatureKind, FeatureSupport};
-use crate::consensus::exon::end_frame_for;
+use crate::consensus::exon::{ExonType, end_frame_for};
 use crate::consensus::filter::SupportFlags;
 use crate::io::fasta::Fasta;
 use crate::model::{Coordset, Strand};
@@ -94,6 +93,11 @@ fn recover_transcript_loci(
 }
 
 /// Build a promoted gene from an isoform's longest ORF, or `None` if too short / no ORF.
+///
+/// `coding_length` (which gates `min_coding_length` and is the score) is the CDS length,
+/// matching the trellis path, whose coding_length counts the leading partial codon
+/// because the CDS starts at the first exon base. Genes with a start codon (phase 0)
+/// are unaffected.
 fn orf_gene(
     iso: &Isoform,
     genome: &Fasta,
@@ -104,10 +108,6 @@ fn orf_gene(
     let st = SplicedTranscript::new(&iso.exons, iso.strand);
     let seq = st.sequence(genome, &iso.contig)?;
     let orf = find_longest_orf(&seq, code)?;
-    let coding_length = orf.len() as i64;
-    if coding_length < min_coding_length {
-        return None;
-    }
     // A start-less ORF begins at its frame offset (0-2) from the transcript's 5' end; as
     // on the trellis path its CDS starts at the first base, the leading partial codon
     // carried as the first CDS row's phase (GFF3), not as a 5'UTR.
@@ -120,6 +120,10 @@ fn orf_gene(
     if cds.is_empty() {
         return None;
     }
+    let coding_length: i64 = cds.iter().map(|c| c.len()).sum();
+    if coding_length < min_coding_length {
+        return None;
+    }
     let evidence: Vec<(String, String)> = iso
         .contained_accs
         .iter()
@@ -128,7 +132,14 @@ fn orf_gene(
             (acc.clone(), src.to_string())
         })
         .collect();
-    let features = cds_features(&cds, iso.strand, cds_start_phase, &evidence);
+    let features = cds_features(
+        &cds,
+        iso.strand,
+        cds_start_phase,
+        orf.has_start,
+        orf.has_stop,
+        &evidence,
+    );
     Some(CalledGene {
         contig: iso.contig.clone(),
         orient: iso.strand,
@@ -155,7 +166,7 @@ fn orf_gene(
 }
 
 /// Evidence-report features of a promoted gene: the CDS segments as exon rows (typed by
-/// position in transcription order; EVM frames — the codon position of the segment's 5'
+/// [`structural_type`] in transcription order; EVM frames — the codon position of the segment's 5'
 /// base, `cum % 3 + 1` over the coding bases 5' of it, exactly as the candidate builder
 /// assigns them — plus 3 on the minus strand) and the gaps between them as intron rows,
 /// every row carrying `evidence`. The walk starts at `-start_phase` (as `cds_phases`
@@ -165,6 +176,8 @@ fn cds_features(
     cds: &[Coordset],
     strand: Strand,
     start_phase: u8,
+    has_start: bool,
+    has_stop: bool,
     evidence: &[(String, String)],
 ) -> Vec<FeatureSupport> {
     let mut segs = cds.to_vec();
@@ -187,7 +200,7 @@ fn cds_features(
         features.push(FeatureSupport {
             coords: seg,
             kind: FeatureKind::Exon {
-                exon_type: position_type(k, n),
+                exon_type: structural_type(k, n, has_start, has_stop),
                 start_frame: start_frame + shift,
                 end_frame: end_frame + shift,
             },
@@ -204,6 +217,22 @@ fn cds_features(
     }
     features.sort_by_key(|f| f.coords.lend);
     features
+}
+
+/// Exon type of the `k`-th of `n` CDS segments (transcription order) of a gene with/without
+/// a start and stop codon: the first segment is Initial only when the gene has a start,
+/// the last Terminal only when it has a stop (a lone segment Single when both), else
+/// Internal. Matches the trellis path, where a 5'-partial path starts at an Internal (or
+/// Terminal) candidate and a 3'-partial one ends at an Internal (or Initial) one.
+fn structural_type(k: usize, n: usize, has_start: bool, has_stop: bool) -> ExonType {
+    let first = k == 0 && has_start;
+    let last = k + 1 == n && has_stop;
+    match (n == 1, first, last) {
+        (true, true, true) => ExonType::Single,
+        (_, true, _) => ExonType::Initial,
+        (_, _, true) => ExonType::Terminal,
+        _ => ExonType::Internal,
+    }
 }
 
 fn is_both_partial(g: &CalledGene) -> bool {
@@ -372,14 +401,32 @@ mod tests {
         assert!(gene.five_utr.is_empty());
         assert_eq!(gene.cds_start_phase, 1);
         assert_eq!(
-            gene.support.coding_length, 18,
-            "complete codons only, as before"
+            gene.support.coding_length, 19,
+            "the CDS length, partial codon included"
         );
-        // the reported frame stays the codon position of the CDS's first base
+        // the reported frame stays the codon position of the CDS's first base; with no
+        // start or stop codon the single segment is typed Internal
         assert!(matches!(
             gene.features[0].kind,
-            FeatureKind::Exon { start_frame: 3, .. }
+            FeatureKind::Exon {
+                exon_type: ExonType::Internal,
+                start_frame: 3,
+                ..
+            }
         ));
+        // the min_coding_length gate uses the CDS length (19)
+        let promote = |min| {
+            promote_and_merge(
+                vec![],
+                &asr,
+                &genome,
+                &GeneticCode::default(),
+                min,
+                &HashMap::new(),
+            )
+        };
+        assert_eq!(promote(19).len(), 1);
+        assert!(promote(20).is_empty());
     }
 
     #[test]
@@ -387,7 +434,7 @@ mod tests {
         // minus CDS 5'->3': 200..209 (10 bp, initial), 100..108 (terminal, cum 10 -> 2)
         let segs = [Coordset::new(100, 108), Coordset::new(200, 209)];
         let ev = vec![("t9".to_string(), "transcript".to_string())];
-        let f = cds_features(&segs, Strand::Minus, 0, &ev);
+        let f = cds_features(&segs, Strand::Minus, 0, true, true, &ev);
         let kinds: Vec<(i64, i64, FeatureKind)> = f
             .iter()
             .map(|x| (x.coords.lend, x.coords.rend, x.kind))
@@ -418,6 +465,28 @@ mod tests {
             ]
         );
         assert!(f.iter().all(|x| x.evidence == ev));
+    }
+
+    #[test]
+    fn cds_features_types_ends_by_start_stop_presence() {
+        let segs = [Coordset::new(10, 20), Coordset::new(40, 50)];
+        let types = |has_start, has_stop| -> Vec<ExonType> {
+            cds_features(&segs, Strand::Plus, 0, has_start, has_stop, &[])
+                .iter()
+                .filter_map(|f| match f.kind {
+                    FeatureKind::Exon { exon_type, .. } => Some(exon_type),
+                    FeatureKind::Intron => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            types(true, false),
+            vec![ExonType::Initial, ExonType::Internal]
+        );
+        assert_eq!(
+            types(false, true),
+            vec![ExonType::Internal, ExonType::Terminal]
+        );
     }
 
     #[test]
