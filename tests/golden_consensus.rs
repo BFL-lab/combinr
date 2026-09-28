@@ -126,3 +126,51 @@ fn alt_splice_emits_isoform_mrnas_and_events() {
         "every gene keeps its consensus mRNA"
     );
 }
+
+fn repeats_file(gff: &str) -> tempfile::NamedTempFile {
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut tmp, gff.as_bytes()).unwrap();
+    tmp
+}
+
+/// Repeats that intersect no region (an unknown contig, and coordinates past the end of
+/// the 63,304 bp `Contig1`, beyond the flank) leave the output unchanged.
+#[test]
+fn repeats_outside_every_region_leave_golden_unchanged() {
+    let tmp = repeats_file(
+        "\
+NoSuchContig\tRM\tmatch\t1\t100000\t.\t+\t.\t.
+Contig1\tRM\tmatch\t90000\t95000\t.\t+\t.\t.
+Contig1\tRM\tmatch\t80000\t85000\t.\t+\t.\t.
+",
+    );
+    let mut cfg = default_config();
+    cfg.repeats = Some(tmp.path().to_path_buf());
+    let got = line_set(&render(&cfg));
+    let expected = common::load_lines(&fixture("smalltest.consensus.gff3.golden"));
+    assert_eq!(got, expected, "out-of-region repeats changed the output");
+}
+
+/// Masking the CDS of the first golden gene changes the output (the mask is applied).
+#[test]
+fn repeats_masking_first_gene_cds_change_output() {
+    let golden = std::fs::read_to_string(fixture("smalltest.consensus.gff3.golden")).unwrap();
+    let cds: Vec<Vec<&str>> = golden
+        .lines()
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .filter(|c| c.len() == 9 && c[2] == "CDS")
+        .collect();
+    let first_parent = cds[0][8].rsplit("Parent=").next().unwrap();
+    let rows: String = cds
+        .iter()
+        .filter(|c| c[8].ends_with(&format!("Parent={first_parent}")))
+        .map(|c| format!("{}\tRM\tmatch\t{}\t{}\t.\t+\t.\t.\n", c[0], c[3], c[4]))
+        .collect();
+    assert!(!rows.is_empty(), "golden has a CDS");
+    let tmp = repeats_file(&rows);
+    let mut cfg = default_config();
+    cfg.repeats = Some(tmp.path().to_path_buf());
+    let got = line_set(&render(&cfg));
+    let expected = common::load_lines(&fixture("smalltest.consensus.gff3.golden"));
+    assert_ne!(got, expected, "masking the first gene's CDS had no effect");
+}

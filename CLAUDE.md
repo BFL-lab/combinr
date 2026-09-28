@@ -59,7 +59,8 @@ peak augmentation via `peaks`) → `grammar` + `trellis` (the gene-structure DP:
 `score_exon`, `are_compatible_exons`, `run_trellis`) → `engine` (both strands via
 reverse-complement-then-transpose; tail/intergenic/long-intron recursion; CDS/UTR
 projection) → `filter` (flag-not-drop low-support) → `output` (→ `OutGene`). `repeats`
-parses the optional mask.
+parses the optional mask (sorted + merged per contig; `pipeline` hands each region only the
+intervals overlapping it via `repeats::overlapping`).
 
 ## Deliberate divergences from EVM (don't "fix" these)
 

@@ -47,11 +47,11 @@ impl RegionVectors {
     }
 
     /// Mark `[lend, rend]` as repeat-masked (excluded from scoring).
+    /// Bases outside the region are ignored.
     pub fn set_masked(&mut self, lend: i64, rend: i64) {
-        for g in lend..=rend {
-            if let Some(k) = self.idx(g) {
-                self.mask.insert(k);
-            }
+        let r = self.clamp(lend, rend);
+        if !r.is_empty() {
+            self.mask.insert_range(r);
         }
     }
 
@@ -117,16 +117,10 @@ impl RegionVectors {
     }
 
     /// Number of unmasked bases in `[lend, rend]` (for length-aware scoring).
+    /// Bases outside the region are not counted.
     pub fn unmasked_len(&self, lend: i64, rend: i64) -> i64 {
-        let mut n = 0;
-        for g in lend..=rend {
-            if let Some(k) = self.idx(g)
-                && !self.mask.contains(k)
-            {
-                n += 1;
-            }
-        }
-        n
+        let r = self.clamp(lend, rend);
+        (r.len() - self.mask.count_ones(r)) as i64
     }
 }
 
@@ -188,6 +182,44 @@ mod tests {
         assert_eq!(v.coding_sum(1, 20), 14.0);
         assert!(v.is_masked(7) && !v.is_masked(4));
         assert_eq!(v.unmasked_len(1, 20), 14);
+    }
+
+    #[test]
+    fn set_masked_clips_to_region() {
+        let mut v = RegionVectors::new(100, 50); // covers genomic 100..149
+        v.set_masked(90, 104); // overhangs the left end
+        v.set_masked(145, 200); // overhangs the right end
+        v.set_masked(1, 99); // entirely before: no-op
+        v.set_masked(150, 300); // entirely after: no-op
+        let masked: Vec<i64> = (90..160).filter(|&g| v.is_masked(g)).collect();
+        assert_eq!(
+            masked,
+            vec![100, 101, 102, 103, 104, 145, 146, 147, 148, 149]
+        );
+        let mut all = RegionVectors::new(100, 50);
+        all.set_masked(0, 1000); // spans both ends
+        assert_eq!(all.unmasked_len(0, 1000), 0);
+    }
+
+    #[test]
+    fn unmasked_len_matches_per_base_count() {
+        let mut v = RegionVectors::new(100, 50);
+        v.set_masked(103, 107);
+        v.set_masked(120, 120);
+        v.set_masked(140, 160);
+        for (lend, rend) in [
+            (90, 200),
+            (100, 149),
+            (104, 121),
+            (50, 99),
+            (150, 170),
+            (120, 120),
+        ] {
+            let expect = (lend..=rend)
+                .filter(|&g| (100..150).contains(&g) && !v.is_masked(g))
+                .count() as i64;
+            assert_eq!(v.unmasked_len(lend, rend), expect, "[{lend},{rend}]");
+        }
     }
 
     #[test]

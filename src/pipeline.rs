@@ -182,14 +182,17 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
         Some(path) => crate::consensus::repeats::parse_repeats(path)?,
         None => std::collections::HashMap::new(),
     };
-    let empty: Vec<crate::model::Coordset> = Vec::new();
 
     let regions = build_regions(&chains, cfg.flank);
     // Regions are independent → process in parallel (as `assemble_sources` does).
     let per_region: Vec<Vec<CalledGene>> = regions
         .par_iter()
         .map(|r| {
-            let region_mask = mask.get(&r.contig).unwrap_or(&empty);
+            // Only the repeats intersecting this region (the per-contig lists are sorted
+            // and merged by `parse_repeats`; `set_masked` clips to the engine's window).
+            let region_mask = mask.get(&r.contig).map_or(&[][..], |m| {
+                crate::consensus::repeats::overlapping(m, r.span)
+            });
             consensus_region(
                 r,
                 &chains,
