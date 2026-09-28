@@ -13,7 +13,7 @@
 
 use crate::consensus::candidates::{CandidateParams, RegionData, build_candidates};
 use crate::consensus::evidence::EvidenceChain;
-use crate::consensus::exon::ExonType;
+use crate::consensus::exon::{ExonType, frame_offset};
 use crate::consensus::filter::{FilterParams, SupportFlags, assess};
 use crate::consensus::region::ConsensusRegion;
 use crate::consensus::trellis::{ConsensusGene, run_trellis, score_all_exons};
@@ -298,8 +298,9 @@ fn resolve(
     let last = &rd.exons[*g.exon_indices.last().unwrap()];
     let has_start = matches!(first.exon_type, ExonType::Initial | ExonType::Single);
     let has_stop = matches!(last.exon_type, ExonType::Terminal | ExonType::Single);
-    // codon-aligned reading start within the spliced transcript (0 for a clean 5' start)
-    let cds_t_start = first.start_frame.saturating_sub(1) as usize;
+    // first codon start within the spliced transcript: skip the partial codon a 5'-partial
+    // path begins with (0 for an initial/single exon, which is always frame 1)
+    let cds_t_start = frame_offset(first.start_frame);
 
     let st = SplicedTranscript::new(&exons, orient);
     let (cds, five_utr, three_utr, hit_stop) = match st.sequence(genome, contig) {
@@ -754,5 +755,132 @@ mod tests {
         eng.search_long_introns = 20_000;
         let on = consensus_region(&region, &chains, &g, &cand, &filt, &w, &eng, &[]);
         assert!(has_b(&on), "long-intron re-search recovers the nested gene");
+    }
+
+    /// A hand-built region (working coordinates) holding the given path exons, and the
+    /// trellis gene that walks them in order.
+    fn partial_path(len: usize, path: &[(i64, i64, ExonType, u8)]) -> (RegionData, ConsensusGene) {
+        use crate::consensus::exon::{ExonCandidate, end_frame_for};
+        use crate::consensus::vectors::{IntronScores, RegionVectors};
+        let exons = path
+            .iter()
+            .map(|&(l, r, t, sf)| ExonCandidate {
+                coords: Coordset::new(l, r),
+                orient: Strand::Plus,
+                exon_type: t,
+                start_frame: sf,
+                end_frame: end_frame_for(sf, r - l + 1),
+                left_seq_boundary: *b"CC",
+                right_seq_boundary: *b"CC",
+                evidence: ev_g(),
+            })
+            .collect();
+        let rd = RegionData {
+            contig: "chr1".into(),
+            span: Coordset::new(1, len as i64),
+            exons,
+            vectors: RegionVectors::new(1, len),
+            introns: IntronScores::default(),
+        };
+        let g = ConsensusGene {
+            exon_indices: (0..path.len()).collect(),
+            orient: Strand::Plus,
+            score: 1.0,
+        };
+        (rd, g)
+    }
+
+    fn resolve_partial(
+        genome: &Fasta,
+        len: usize,
+        path: &[(i64, i64, ExonType, u8)],
+        orient: Strand,
+        transpose_hi: Option<i64>,
+    ) -> CalledGene {
+        let (rd, g) = partial_path(len, path);
+        let support = SupportFlags {
+            raw_noncoding: 0.0,
+            noncoding_equivalent: 0.0,
+            score_ratio: 0.0,
+            coding_length: 0,
+            low_support: false,
+        };
+        resolve(
+            &g,
+            &rd,
+            "chr1",
+            orient,
+            transpose_hi,
+            support,
+            genome,
+            &GeneticCode::default(),
+        )
+    }
+
+    #[test]
+    fn five_prime_partial_frame2_skips_two_bases() {
+        // Internal 10..30 (start frame 2: its first base is codon position 2) -> Terminal
+        // 50..60. The next codon starts 2 bases in, at 12: AGC CCC CCC TAA (stop 21..23).
+        // Reading 1 base in (from 11) would hit TAG at 11..13 at once.
+        let g = genome_with(80, &[(11, b"TAG"), (21, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Internal, 2),
+            (50, 60, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(12, 23)],
+            "CDS read from exon.lend + 2"
+        );
+        assert_eq!(gene.five_utr, vec![Coordset::new(10, 11)]);
+        assert!(gene.partial5, "path starts at an internal exon");
+        assert!(!gene.partial3, "terminal exon + in-frame stop");
+    }
+
+    #[test]
+    fn five_prime_partial_frame3_skips_one_base() {
+        // start frame 3: the next codon starts 1 base in, at 11: CTA GCC CCC TAA (stop
+        // 20..22). Reading 2 bases in (from 12) would hit TAG at 12..14 at once.
+        let g = genome_with(80, &[(12, b"TAG"), (20, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Internal, 3),
+            (50, 60, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(11, 22)],
+            "CDS read from exon.lend + 1"
+        );
+        assert_eq!(gene.five_utr, vec![Coordset::new(10, 10)]);
+        assert!(gene.partial5);
+        assert!(!gene.partial3);
+    }
+
+    #[test]
+    fn five_prime_partial_frame2_minus_strand() {
+        // The frame-2 case in the RC-local pass (hi = 200): Internal 11..31 (sf 2) ->
+        // Terminal 51..61, i.e. forward 170..190 (5') and 140..150. RC-local codons from
+        // 13: AGC CCC CCC TAA (stop 22..24); from 12 it would hit TAG at 12..14 at once.
+        // The forward genome is the reverse complement of that RC-local sequence.
+        let mut rc = vec![b'C'; 200];
+        rc[11..14].copy_from_slice(b"TAG"); // RC-local 12..14
+        rc[21..24].copy_from_slice(b"TAA"); // RC-local 22..24
+        let g = write_fasta(&reverse_complement(&rc));
+        let path = [
+            (11, 31, ExonType::Internal, 2),
+            (51, 61, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 200, &path, Strand::Minus, Some(200));
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(140, 150), Coordset::new(170, 190)]
+        );
+        // RC-local 13..24 -> forward 177..188 (the 5' end is forward rend - 2 = 188)
+        assert_eq!(gene.cds, vec![Coordset::new(177, 188)]);
+        assert_eq!(gene.five_utr, vec![Coordset::new(189, 190)]);
+        assert!(gene.partial5);
+        assert!(!gene.partial3);
     }
 }

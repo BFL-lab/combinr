@@ -65,6 +65,15 @@ pub fn end_frame_for(start_frame: u8, len: i64) -> u8 {
     if m == 0 { 3 } else { m as u8 }
 }
 
+/// Bases to skip from an exon's first base to the next codon start, given its forward
+/// `start_frame` (`1..=3`). The frame is the codon position of the exon's first base
+/// (1 = codon start, as `end_frame_for` and the candidate builder assign it), so frame 2
+/// skips 2 bases and frame 3 skips 1. Inverse of [`determine_good_phases`]' offset->phase
+/// map (`off % 3`: 0->1, 1->3, 2->2).
+pub fn frame_offset(start_frame: u8) -> usize {
+    ((4 - start_frame) % 3) as usize
+}
+
 /// Map a forward frame (`1..=3`) to its reverse-strand encoding (`4..=6`).
 pub fn to_reverse_frame(f: u8) -> u8 {
     f + 3
@@ -107,6 +116,13 @@ mod tests {
         assert_eq!(end_frame_for(1, 2), 2);
         // len 100, frame 2 -> (100+2-1)%3 = 101%3 = 2
         assert_eq!(end_frame_for(2, 100), 2);
+    }
+
+    #[test]
+    fn frame_offset_skips_to_next_codon_start() {
+        assert_eq!(frame_offset(1), 0);
+        assert_eq!(frame_offset(2), 2);
+        assert_eq!(frame_offset(3), 1);
     }
 
     #[test]

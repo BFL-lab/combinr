@@ -20,7 +20,9 @@
 //! forward-strand candidates only.
 
 use crate::consensus::evidence::EvidenceChain;
-use crate::consensus::exon::{ExonCandidate, ExonType, determine_good_phases, end_frame_for};
+use crate::consensus::exon::{
+    ExonCandidate, ExonType, determine_good_phases, end_frame_for, frame_offset,
+};
 use crate::consensus::peaks::PeakSignal;
 use crate::consensus::region::ConsensusRegion;
 use crate::consensus::vectors::{IntronScores, RegionVectors};
@@ -232,11 +234,7 @@ impl Builder<'_> {
     /// Genomic position of the last base of the first in-frame stop at or after `seg`
     /// (reading from `seg.lend` in the given phase), within the extension cap.
     fn downstream_stop(&self, seg: Coordset, phase: u8) -> Option<i64> {
-        let offset = match phase {
-            1 => 0,
-            2 => 2,
-            _ => 1,
-        };
+        let offset = frame_offset(phase) as i64;
         let limit = seg.rend + MAX_TERMINAL_EXTEND;
         let mut cs = seg.lend + offset;
         while cs + 2 <= limit {
