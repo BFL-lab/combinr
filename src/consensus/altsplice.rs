@@ -210,7 +210,7 @@ pub fn augment(
 
 /// A consensus gene's CDS as a `CdsModel` for grafting, or `None` if it has no CDS.
 fn to_cds_model(g: &CalledGene, id: String) -> Option<CdsModel> {
-    cds_model(&id, &g.contig, g.orient, &g.cds, 0)
+    cds_model(&id, &g.contig, g.orient, &g.cds, g.cds_start_phase)
 }
 
 /// A lend-sorted CDS as a `CdsModel`, or `None` if empty. The start codon is the 5'-most
@@ -260,7 +260,12 @@ fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
     // Adopt the salvaged UTRs only when the base consensus has none of its own; extend
     // the CDS-only exon structure with the UTR segments (merging the UTR that abuts a
     // terminal CDS exon into it, keeping any spliced UTR exon separate).
-    let use_salvage = g.five_utr.is_empty() && g.three_utr.is_empty() && !utrs.is_empty();
+    // A CDS that begins mid-codon (`cds_start_phase > 0`) has no UTR room at its 5' end
+    // — this keeps such genes unsalvaged, as when their partial codon was a 5'UTR stub.
+    let use_salvage = g.five_utr.is_empty()
+        && g.three_utr.is_empty()
+        && g.cds_start_phase == 0
+        && !utrs.is_empty();
     let (exons, five_utr, three_utr) = if use_salvage {
         if !utrs.sources.is_empty() {
             attrs.push(("sources".into(), utrs.sources.clone()));
@@ -285,7 +290,7 @@ fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
         five_utr,
         three_utr,
         attrs,
-        cds_start_phase: 0,
+        cds_start_phase: g.cds_start_phase,
     }
 }
 
@@ -565,6 +570,7 @@ mod tests {
             three_utr: vec![],
             partial5: false,
             partial3: false,
+            cds_start_phase: 0,
             score: 100.0,
             support: SupportFlags {
                 raw_noncoding: 0.0,
@@ -597,6 +603,46 @@ mod tests {
         assert_eq!(m.start_genomic, 10);
         assert_eq!(m.stop_genomic, 90);
         assert_eq!(m.cds_segments, vec![cs(10, 40), cs(60, 90)]);
+    }
+
+    #[test]
+    fn mid_codon_cds_start_takes_no_salvaged_utr() {
+        let mut g = consensus_gene(&[(10, 40), (60, 90)]);
+        let utrs = Utrs {
+            five: vec![cs(1, 5)],
+            three: vec![],
+            sources: vec![],
+            contains: vec![],
+        };
+        // phase 0: the salvaged 5'UTR is adopted (unchanged behavior)
+        assert_eq!(consensus_mrna(&g, "g1", &utrs).five_utr, vec![cs(1, 5)]);
+        // a 5'-partial CDS starting mid-codon keeps its own (empty) UTRs and phase
+        g.partial5 = true;
+        g.cds_start_phase = 2;
+        let m = consensus_mrna(&g, "g1", &utrs);
+        assert!(m.five_utr.is_empty());
+        assert_eq!(m.exons, vec![cs(10, 40), cs(60, 90)]);
+        assert_eq!(m.cds_start_phase, 2);
+    }
+
+    #[test]
+    fn to_cds_model_of_a_five_prime_partial_gene_starts_in_frame() {
+        // CDS from the exon's first base, phase 2: the first complete codon is 2 bases in
+        let mut g = consensus_gene(&[(10, 40), (60, 90)]);
+        g.partial5 = true;
+        g.cds_start_phase = 2;
+        let m = to_cds_model(&g, "cons0".into()).unwrap();
+        assert_eq!((m.start_genomic, m.stop_genomic), (12, 90));
+        assert_eq!(
+            m.cds_segments,
+            vec![cs(10, 40), cs(60, 90)],
+            "segments verbatim"
+        );
+        // minus strand: the 5' end is the last segment's rend
+        g.orient = Strand::Minus;
+        g.cds_start_phase = 1;
+        let m = to_cds_model(&g, "cons0".into()).unwrap();
+        assert_eq!((m.start_genomic, m.stop_genomic), (89, 10));
     }
 
     #[test]

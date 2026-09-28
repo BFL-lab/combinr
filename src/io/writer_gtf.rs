@@ -128,4 +128,35 @@ mod tests {
         assert!(out.contains("\texon\t100\t200\t"));
         assert!(out.contains("contains \"a\";"));
     }
+
+    #[test]
+    fn five_prime_partial_first_cds_row_carries_the_start_phase() {
+        use crate::model::Coordset;
+        let cds = vec![Coordset::new(10, 20), Coordset::new(30, 40)];
+        let genes = vec![OutGene {
+            gene_id: "g1".into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            lend: 10,
+            rend: 40,
+            attrs: vec![],
+            transcripts: vec![OutTranscript {
+                transcript_id: "g1.t1".into(),
+                contig: "chr1".into(),
+                strand: Strand::Plus,
+                exons: cds.clone(),
+                cds,
+                five_utr: vec![],
+                three_utr: vec![],
+                attrs: vec![],
+                cds_start_phase: 1,
+            }],
+        }];
+        let mut buf = Vec::new();
+        write(&mut buf, &genes).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // 10..20 phase 1; 30..40 after 11-1 = 10 bases -> 2
+        assert!(out.contains("\tCDS\t10\t20\t.\t+\t1\t"), "{out}");
+        assert!(out.contains("\tCDS\t30\t40\t.\t+\t2\t"), "{out}");
+    }
 }

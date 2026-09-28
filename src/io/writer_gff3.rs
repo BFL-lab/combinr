@@ -211,4 +211,50 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         assert!(out.contains("\tgene\t1\t10\t.\t+\t.\tID=g1;Name=x%3By,z\n"));
     }
+
+    #[test]
+    fn five_prime_partial_first_cds_row_carries_the_start_phase() {
+        use crate::model::Coordset;
+        let cds = vec![
+            Coordset::new(10, 20),
+            Coordset::new(30, 40),
+            Coordset::new(50, 58),
+        ];
+        let gene = |strand: Strand| OutGene {
+            gene_id: "g1".into(),
+            contig: "chr1".into(),
+            strand,
+            lend: 10,
+            rend: 58,
+            attrs: vec![],
+            transcripts: vec![OutTranscript {
+                transcript_id: "g1.t1".into(),
+                contig: "chr1".into(),
+                strand,
+                exons: cds.clone(),
+                cds: cds.clone(),
+                five_utr: vec![],
+                three_utr: vec![],
+                attrs: vec![],
+                cds_start_phase: 2,
+            }],
+        };
+        let render = |strand| {
+            let mut buf = Vec::new();
+            write(&mut buf, &[gene(strand)]).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        // plus, 5'->3': 10..20 phase 2; 30..40 after 11-2 = 9 bases -> 0; 50..58 after
+        // 20 -> 1
+        let plus = render(Strand::Plus);
+        assert!(plus.contains("\tCDS\t10\t20\t.\t+\t2\t"), "{plus}");
+        assert!(plus.contains("\tCDS\t30\t40\t.\t+\t0\t"), "{plus}");
+        assert!(plus.contains("\tCDS\t50\t58\t.\t+\t1\t"), "{plus}");
+        assert!(!plus.contains("five_prime_UTR"));
+        // minus, 5'->3': 50..58 phase 2; 30..40 after 9-2 = 7 -> 2; 10..20 after 18 -> 0
+        let minus = render(Strand::Minus);
+        assert!(minus.contains("\tCDS\t50\t58\t.\t-\t2\t"), "{minus}");
+        assert!(minus.contains("\tCDS\t30\t40\t.\t-\t2\t"), "{minus}");
+        assert!(minus.contains("\tCDS\t10\t20\t.\t-\t0\t"), "{minus}");
+    }
 }

@@ -149,6 +149,7 @@ mod tests {
             three_utr: vec![],
             partial5: false,
             partial3: true,
+            cds_start_phase: 0,
             score: 1234.567,
             support: SupportFlags {
                 raw_noncoding: 0.0,

@@ -108,7 +108,15 @@ fn orf_gene(
     if coding_length < min_coding_length {
         return None;
     }
-    let (cds, five_utr, three_utr) = st.cds_and_utrs(orf.t_start, orf.t_end);
+    // A start-less ORF begins at its frame offset (0-2) from the transcript's 5' end; as
+    // on the trellis path its CDS starts at the first base, the leading partial codon
+    // carried as the first CDS row's phase (GFF3), not as a 5'UTR.
+    let (cds_t_start, cds_start_phase) = if orf.has_start {
+        (orf.t_start, 0)
+    } else {
+        (0, orf.t_start as u8)
+    };
+    let (cds, five_utr, three_utr) = st.cds_and_utrs(cds_t_start, orf.t_end);
     if cds.is_empty() {
         return None;
     }
@@ -120,7 +128,7 @@ fn orf_gene(
             (acc.clone(), src.to_string())
         })
         .collect();
-    let features = cds_features(&cds, iso.strand, &evidence);
+    let features = cds_features(&cds, iso.strand, cds_start_phase, &evidence);
     Some(CalledGene {
         contig: iso.contig.clone(),
         orient: iso.strand,
@@ -130,6 +138,7 @@ fn orf_gene(
         three_utr,
         partial5: !orf.has_start,
         partial3: !orf.has_stop,
+        cds_start_phase,
         score: coding_length as f64,
         support: SupportFlags {
             // no consensus noncoding baseline: 0.0 placeholder (never printed — the
@@ -149,10 +158,13 @@ fn orf_gene(
 /// position in transcription order; EVM frames — the codon position of the segment's 5'
 /// base, `cum % 3 + 1` over the coding bases 5' of it, exactly as the candidate builder
 /// assigns them — plus 3 on the minus strand) and the gaps between them as intron rows,
-/// every row carrying `evidence`. Returned in ascending `lend` order.
+/// every row carrying `evidence`. The walk starts at `-start_phase` (as `cds_phases`
+/// does) so a 5'-partial CDS's leading partial codon keeps its codon position. Returned
+/// in ascending `lend` order.
 fn cds_features(
     cds: &[Coordset],
     strand: Strand,
+    start_phase: u8,
     evidence: &[(String, String)],
 ) -> Vec<FeatureSupport> {
     let mut segs = cds.to_vec();
@@ -160,7 +172,7 @@ fn cds_features(
     let minus = strand == Strand::Minus;
     let n = segs.len();
     let mut features = Vec::with_capacity(2 * n);
-    let mut cum = 0i64;
+    let mut cum = -i64::from(start_phase);
     // walk 5'->3' so the type and frame follow transcription order
     let order: Vec<usize> = if minus {
         (0..n).rev().collect()
@@ -280,6 +292,7 @@ mod tests {
             three_utr: vec![],
             partial5,
             partial3,
+            cds_start_phase: 0,
             score: 100.0,
             support: SupportFlags {
                 raw_noncoding: 0.0,
@@ -330,11 +343,51 @@ mod tests {
     }
 
     #[test]
+    fn startless_orf_cds_starts_at_the_transcript_base_with_its_phase() {
+        // transcript 10..30 (offsets 0..20): TAA at offset 0 kills frame 0, TGA at
+        // offsets 5..7 kills frame 2; frame 1 (offsets 1..19, no ATG, no stop) is the
+        // longest ORF: start-less, first complete codon 1 base in.
+        let mut g = vec![b'C'; 60];
+        g[9..12].copy_from_slice(b"TAA"); // 10..12
+        g[14..17].copy_from_slice(b"TGA"); // 15..17
+        let genome = write_fasta(&g);
+        let (mut asr, _) = asr_one();
+        asr.isoforms = vec![iso("t1", &[(10, 30)])];
+        let out = promote_and_merge(
+            vec![],
+            &asr,
+            &genome,
+            &GeneticCode::default(),
+            15,
+            &HashMap::new(),
+        );
+        assert_eq!(out.len(), 1);
+        let gene = &out[0];
+        assert!(gene.partial5 && gene.partial3);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(10, 28)],
+            "ORF 11..28 + partial codon"
+        );
+        assert!(gene.five_utr.is_empty());
+        assert_eq!(gene.cds_start_phase, 1);
+        assert_eq!(
+            gene.support.coding_length, 18,
+            "complete codons only, as before"
+        );
+        // the reported frame stays the codon position of the CDS's first base
+        assert!(matches!(
+            gene.features[0].kind,
+            FeatureKind::Exon { start_frame: 3, .. }
+        ));
+    }
+
+    #[test]
     fn cds_features_minus_strand_types_frames_and_introns() {
         // minus CDS 5'->3': 200..209 (10 bp, initial), 100..108 (terminal, cum 10 -> 2)
         let segs = [Coordset::new(100, 108), Coordset::new(200, 209)];
         let ev = vec![("t9".to_string(), "transcript".to_string())];
-        let f = cds_features(&segs, Strand::Minus, &ev);
+        let f = cds_features(&segs, Strand::Minus, 0, &ev);
         let kinds: Vec<(i64, i64, FeatureKind)> = f
             .iter()
             .map(|x| (x.coords.lend, x.coords.rend, x.kind))
