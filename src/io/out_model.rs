@@ -18,6 +18,10 @@ pub struct OutTranscript {
     pub three_utr: Vec<Coordset>,
     /// Extra attributes (key → values; multiple values render as a comma list).
     pub attrs: Vec<(String, Vec<String>)>,
+    /// Phase (0-2) of the 5'-most CDS segment: the bases to skip before the first
+    /// complete codon. 0 for every CDS combinr builds; nonzero only for a 5'-partial
+    /// model read verbatim from an input gene set (`--models`).
+    pub cds_start_phase: u8,
 }
 
 /// One gene (locus) with its transcripts.
@@ -27,6 +31,10 @@ pub struct OutGene {
     pub strand: Strand,
     pub lend: i64,
     pub rend: i64,
+    /// Extra gene attributes (key → values), written after `ID=` by the GFF3 writer
+    /// (ignored by GTF). Empty for every gene combinr builds; carries an input gene
+    /// set's attributes through `--models`.
+    pub attrs: Vec<(String, Vec<String>)>,
     pub transcripts: Vec<OutTranscript>,
 }
 
@@ -73,6 +81,7 @@ pub fn from_assemblies(assemblies: &[ClusterAssembly]) -> Vec<OutGene> {
                 strand: asm.orient,
                 lend,
                 rend,
+                attrs: Vec::new(),
                 transcripts: vec![OutTranscript {
                     transcript_id: format!("{gene_id}.t1"),
                     contig: asm.structure.contig.clone(),
@@ -82,6 +91,7 @@ pub fn from_assemblies(assemblies: &[ClusterAssembly]) -> Vec<OutGene> {
                     five_utr: Vec::new(),
                     three_utr: Vec::new(),
                     attrs,
+                    cds_start_phase: 0,
                 }],
             }
         })
@@ -144,6 +154,7 @@ fn build_loci(
             strand: locus.strand,
             lend,
             rend,
+            attrs: Vec::new(),
             transcripts,
         });
     }
@@ -169,6 +180,7 @@ fn make_transcript(iso: &Isoform, tid: &str, ann: Option<&CodingAnnotation>) -> 
         five_utr: ann.map(|a| a.five_utr.clone()).unwrap_or_default(),
         three_utr: ann.map(|a| a.three_utr.clone()).unwrap_or_default(),
         attrs,
+        cds_start_phase: 0,
     }
 }
 
@@ -182,9 +194,14 @@ fn push_sources<'a>(
     }
 }
 
-/// CDS phase per segment, in transcription order. Returns a map keyed by
-/// `(lend, rend)`.
-pub fn cds_phases(cds: &[Coordset], strand: Strand) -> std::collections::HashMap<(i64, i64), u8> {
+/// CDS phase per segment, in transcription order, given the phase of the 5'-most
+/// segment (`start_phase`, 0 for a CDS that begins on a complete codon). Returns a map
+/// keyed by `(lend, rend)`.
+pub fn cds_phases(
+    cds: &[Coordset],
+    strand: Strand,
+    start_phase: u8,
+) -> std::collections::HashMap<(i64, i64), u8> {
     let mut order: Vec<&Coordset> = cds.iter().collect();
     if strand == Strand::Minus {
         order.sort_by(|a, b| b.lend.cmp(&a.lend));
@@ -192,9 +209,11 @@ pub fn cds_phases(cds: &[Coordset], strand: Strand) -> std::collections::HashMap
         order.sort_by_key(|c| c.lend);
     }
     let mut phases = std::collections::HashMap::new();
-    let mut cumulative = 0i64;
+    // Coding bases preceding each segment, counted from the first complete codon: the
+    // `start_phase` bases skipped at the 5' end count negatively.
+    let mut cumulative = -i64::from(start_phase);
     for seg in order {
-        let phase = ((3 - (cumulative % 3)) % 3) as u8;
+        let phase = ((3 - cumulative.rem_euclid(3)) % 3) as u8;
         phases.insert((seg.lend, seg.rend), phase);
         cumulative += seg.len();
     }
@@ -207,5 +226,41 @@ pub fn strand_char(s: Strand) -> char {
         Strand::Plus => '+',
         Strand::Minus => '-',
         Strand::Unknown => '.',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cs(l: i64, r: i64) -> Coordset {
+        Coordset::new(l, r)
+    }
+
+    #[test]
+    fn cds_phases_start_phase_zero_is_unchanged() {
+        // segments of 10, 11, 9 bases, plus strand: 0, then (3 - 10%3)%3 = 2, then
+        // (3 - 21%3)%3 = 0.
+        let cds = [cs(1, 10), cs(21, 31), cs(41, 49)];
+        let p = cds_phases(&cds, Strand::Plus, 0);
+        assert_eq!((p[&(1, 10)], p[&(21, 31)], p[&(41, 49)]), (0, 2, 0));
+    }
+
+    #[test]
+    fn cds_phases_honours_start_phase_on_both_strands() {
+        let cds = [cs(1, 10), cs(21, 31), cs(41, 49)];
+        // plus, start phase 1: 10-1 = 9 coding bases -> next 0; 9+11 = 20 -> next 1.
+        let p = cds_phases(&cds, Strand::Plus, 1);
+        assert_eq!((p[&(1, 10)], p[&(21, 31)], p[&(41, 49)]), (1, 0, 1));
+        // plus, start phase 2: 10-2 = 8 -> next 1; 8+11 = 19 -> next 2.
+        let p = cds_phases(&cds, Strand::Plus, 2);
+        assert_eq!((p[&(1, 10)], p[&(21, 31)], p[&(41, 49)]), (2, 1, 2));
+        // minus: transcription order is (41,49), (21,31), (1,10).
+        // start phase 1: 9-1 = 8 -> next 1; 8+11 = 19 -> next 2.
+        let p = cds_phases(&cds, Strand::Minus, 1);
+        assert_eq!((p[&(41, 49)], p[&(21, 31)], p[&(1, 10)]), (1, 1, 2));
+        // start phase 2: 9-2 = 7 -> next 2; 7+11 = 18 -> next 0.
+        let p = cds_phases(&cds, Strand::Minus, 2);
+        assert_eq!((p[&(41, 49)], p[&(21, 31)], p[&(1, 10)]), (2, 2, 0));
     }
 }

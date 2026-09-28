@@ -1,21 +1,27 @@
-//! Phase 2: emit a consensus gene's alternative transcript isoforms as extra mRNAs,
-//! with each isoform's CDS derived from the consensus ("the alt-splice set is based off
-//! the gene-prediction consensus").
+//! Phase 2: emit a consensus gene's — or an externally supplied gene set's — alternative
+//! transcript isoforms as extra mRNAs, with each isoform's CDS derived from the gene's
+//! own CDS ("the alt-splice set is based off the gene-prediction consensus").
 //!
-//! Each consensus gene becomes a `CdsModel`; the existing `orf::reconcile` grafts that CDS
+//! Each gene's CDS becomes a `CdsModel`; the existing `orf::reconcile` grafts that CDS
 //! onto the transcript isoforms (inherit if the structure matches, re-project from the
-//! consensus start if divergent) and region-tags the alt-splice events. We then assemble
-//! one `OutGene` per consensus gene whose mRNAs are the consensus model PLUS every isoform
-//! that hosts its CDS (deduping an isoform identical to the consensus). Opt-in via
-//! `--alt-splice`; the default one-model-per-locus output is untouched.
+//! gene's start codon if divergent) and region-tags the alt-splice events. We then
+//! assemble one `OutGene` per gene whose mRNAs are its own model(s) PLUS every isoform
+//! that hosts its CDS and is a genuine alternative ([`is_genuine_alternative`]).
+//!
+//! - [`annotate`] (`consensus --alt-splice`): the consensus genes; the consensus mRNA
+//!   also adopts UTRs salvaged from compatible transcripts. Opt-in; the default
+//!   one-model-per-locus output is untouched.
+//! - [`augment`] (`assemble --models`): an input gene set, emitted verbatim, with the
+//!   genuine alternatives appended (no UTR salvage, input transcripts untouched).
 
 use crate::altsplice::{AltSpliceResult, EventRecord, Isoform};
 use crate::consensus::engine::CalledGene;
+use crate::consensus::output::ordered_with_ids;
 use crate::io::fasta::Fasta;
 use crate::io::out_model::{OutGene, OutTranscript};
-use crate::model::{Coordset, Strand, introns_between};
+use crate::model::{Coordset, Strand, introns_between, merge_coords};
 use crate::orf::{CdsModel, CodingAnnotation, GeneticCode, reconcile};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Annotate consensus genes with their alternative transcript isoforms. Returns the
 /// output genes (consensus mRNA + hosting isoform mRNAs each) and the region-tagged
@@ -26,16 +32,15 @@ pub fn annotate(
     genome: &Fasta,
     code: &GeneticCode,
 ) -> (Vec<OutGene>, Vec<EventRecord>) {
-    // deterministic output order + gene ids
-    let mut order: Vec<usize> = (0..genes.len()).collect();
-    order.sort_by(|&a, &b| gkey(&genes[a]).cmp(&gkey(&genes[b])));
+    // deterministic output order + gene ids (shared with `to_out_genes` and the report)
+    let order = ordered_with_ids(genes);
 
     // each consensus gene -> a CdsModel id'd by its output rank
     let mut models = Vec::new();
-    let mut model_id_for: Vec<Option<String>> = vec![None; genes.len()];
-    for (rank, &gi) in order.iter().enumerate() {
-        if let Some(m) = to_cds_model(&genes[gi], format!("cons{rank}")) {
-            model_id_for[gi] = Some(m.id.clone());
+    let mut model_id_for: Vec<Option<String>> = vec![None; order.len()];
+    for (rank, (_, g)) in order.iter().enumerate() {
+        if let Some(m) = to_cds_model(g, format!("cons{rank}")) {
+            model_id_for[rank] = Some(m.id.clone());
             models.push(m);
         }
     }
@@ -46,9 +51,7 @@ pub fn annotate(
     let iso_introns: Vec<Vec<Coordset>> = asr.isoforms.iter().map(|iso| iso.introns()).collect();
 
     let mut out_genes = Vec::with_capacity(order.len());
-    for (rank, &gi) in order.iter().enumerate() {
-        let g = &genes[gi];
-        let gene_id = format!("consensus.{}.g{}", g.contig, rank + 1);
+    for (rank, (gene_id, g)) in order.into_iter().enumerate() {
         // The consensus CDS introns, computed once per gene and reused by the
         // truncation test and UTR salvage below.
         let cds_introns = seg_introns(&g.cds);
@@ -62,7 +65,7 @@ pub fn annotate(
         // (Dropping the spurious truncation mRNAs mirrors PASA subsuming a contained
         // alignment and EVM never minting a terminal exon at a truncation point.)
         let mut alt_isoforms: Vec<(&Isoform, &CodingAnnotation)> = Vec::new();
-        if let Some(mid) = &model_id_for[gi] {
+        if let Some(mid) = &model_id_for[rank] {
             for (idx, iso) in asr.isoforms.iter().enumerate() {
                 let Some(ann) = recon.isoform_codings[idx]
                     .iter()
@@ -70,14 +73,7 @@ pub fn annotate(
                 else {
                     continue;
                 };
-                if ann.coding_altered
-                    && !is_terminal_truncation(
-                        &iso.exons,
-                        &iso_introns[idx],
-                        &g.cds,
-                        &cds_introns,
-                        ann,
-                    )
+                if is_genuine_alternative(&iso.exons, &iso_introns[idx], &g.cds, &cds_introns, ann)
                 {
                     alt_isoforms.push((iso, ann));
                 }
@@ -102,6 +98,7 @@ pub fn annotate(
             strand: g.orient,
             lend,
             rend,
+            attrs: Vec::new(),
             transcripts,
         });
     }
@@ -109,20 +106,136 @@ pub fn annotate(
     (out_genes, recon.events)
 }
 
+/// Augment an input gene set (`assemble --models`) with its alternative transcript
+/// isoforms. Every input gene and transcript is kept verbatim, in input order; each
+/// isoform that hosts the gene's primary CDS (the transcript with the longest total CDS,
+/// ties → first) and is a genuine alternative ([`is_genuine_alternative`]) against EVERY
+/// model of the gene it hosts is appended as `{gene_id}.iso{n}` (the first `n` whose id
+/// is not already taken in that gene) carrying the primary model's grafted CDS. The gene
+/// span is only ever widened. As on the consensus path, an isoform may attach to several
+/// overlapping same-strand genes. Returns the genes and the region-tagged events.
+pub fn augment(
+    mut models: Vec<OutGene>,
+    asr: AltSpliceResult,
+    genome: &Fasta,
+    code: &GeneticCode,
+) -> (Vec<OutGene>, Vec<EventRecord>) {
+    // one CdsModel per input transcript with a CDS; `owner` maps its id to (gene, tx)
+    let mut cds_models = Vec::new();
+    let mut owner: HashMap<String, (usize, usize)> = HashMap::new();
+    for (gi, g) in models.iter().enumerate() {
+        if g.strand == Strand::Unknown {
+            continue;
+        }
+        for (ti, t) in g.transcripts.iter().enumerate() {
+            let id = format!("m{gi}.{ti}");
+            if let Some(m) = cds_model(&id, &t.contig, t.strand, &t.cds, t.cds_start_phase) {
+                owner.insert(id, (gi, ti));
+                cds_models.push(m);
+            }
+        }
+    }
+
+    let recon = reconcile(
+        &asr.isoforms,
+        &asr.loci,
+        asr.events,
+        &cds_models,
+        genome,
+        code,
+    );
+
+    // per gene: isoform index -> the (transcript, annotation) pairs it hosts
+    type Hits<'a> = BTreeMap<usize, Vec<(usize, &'a CodingAnnotation)>>;
+    let mut hits: Vec<Hits> = (0..models.len()).map(|_| BTreeMap::new()).collect();
+    for (idx, anns) in recon.isoform_codings.iter().enumerate() {
+        for ann in anns {
+            let (gi, ti) = owner[&ann.model_id];
+            hits[gi].entry(idx).or_default().push((ti, ann));
+        }
+    }
+
+    for (g, gene_hits) in models.iter_mut().zip(&hits) {
+        let Some(primary) = (0..g.transcripts.len())
+            .filter(|&ti| !g.transcripts[ti].cds.is_empty())
+            .rev()
+            .max_by_key(|&ti| total_len(&g.transcripts[ti].cds))
+        else {
+            continue; // no CDS: emitted verbatim
+        };
+        let cds_introns: Vec<Vec<Coordset>> =
+            g.transcripts.iter().map(|t| seg_introns(&t.cds)).collect();
+        let mut taken: HashSet<String> = g
+            .transcripts
+            .iter()
+            .map(|t| t.transcript_id.clone())
+            .collect();
+        let mut n = 1;
+        let mut appended = Vec::new();
+        for (&idx, anns) in gene_hits {
+            let Some(&(_, primary_ann)) = anns.iter().find(|(ti, _)| *ti == primary) else {
+                continue; // cannot host the primary CDS start
+            };
+            let iso = &asr.isoforms[idx];
+            let iso_introns = iso.introns();
+            let genuine = anns.iter().all(|&(ti, ann)| {
+                is_genuine_alternative(
+                    &iso.exons,
+                    &iso_introns,
+                    &g.transcripts[ti].cds,
+                    &cds_introns[ti],
+                    ann,
+                )
+            });
+            if !genuine {
+                continue;
+            }
+            while taken.contains(&format!("{}.iso{n}", g.gene_id)) {
+                n += 1;
+            }
+            let t = iso_mrna(iso, primary_ann, &g.gene_id, n);
+            taken.insert(t.transcript_id.clone());
+            appended.push(t);
+        }
+        let (lend, rend) = span_of(&appended);
+        if !appended.is_empty() {
+            g.lend = g.lend.min(lend);
+            g.rend = g.rend.max(rend);
+        }
+        g.transcripts.extend(appended);
+    }
+
+    (models, recon.events)
+}
+
 /// A consensus gene's CDS as a `CdsModel` for grafting, or `None` if it has no CDS.
 fn to_cds_model(g: &CalledGene, id: String) -> Option<CdsModel> {
-    let first = g.cds.first()?;
-    let last = g.cds.last()?;
-    let (start_genomic, stop_genomic) = if g.orient == Strand::Minus {
-        (last.rend, first.lend)
+    cds_model(&id, &g.contig, g.orient, &g.cds, 0)
+}
+
+/// A lend-sorted CDS as a `CdsModel`, or `None` if empty. The start codon is the 5'-most
+/// CDS base shifted INTO frame by `start_phase` (the 5' phase of a 5'-partial model), so
+/// a divergent isoform is projected in the model's reading frame.
+fn cds_model(
+    id: &str,
+    contig: &str,
+    strand: Strand,
+    cds: &[Coordset],
+    start_phase: u8,
+) -> Option<CdsModel> {
+    let first = cds.first()?;
+    let last = cds.last()?;
+    let phase = i64::from(start_phase);
+    let (start_genomic, stop_genomic) = if strand == Strand::Minus {
+        (last.rend - phase, first.lend)
     } else {
-        (first.lend, last.rend)
+        (first.lend + phase, last.rend)
     };
     Some(CdsModel {
-        id,
-        contig: g.contig.clone(),
-        strand: g.orient,
-        cds_segments: g.cds.clone(),
+        id: id.to_string(),
+        contig: contig.to_string(),
+        strand,
+        cds_segments: cds.to_vec(),
         start_genomic,
         stop_genomic,
     })
@@ -172,6 +285,7 @@ fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
         five_utr,
         three_utr,
         attrs,
+        cds_start_phase: 0,
     }
 }
 
@@ -257,23 +371,6 @@ fn clip_beyond(exons: &[Coordset], bound: i64, above: bool) -> Vec<Coordset> {
 /// Whether any exon spans the genomic position `pos`.
 fn covers(exons: &[Coordset], pos: i64) -> bool {
     exons.iter().any(|e| e.lend <= pos && pos <= e.rend)
-}
-
-/// Merge overlapping or directly adjacent segments (sorted, coalesced).
-fn merge_coords(mut segs: Vec<Coordset>) -> Vec<Coordset> {
-    segs.sort_by_key(|c| (c.lend, c.rend));
-    let mut out: Vec<Coordset> = Vec::new();
-    for s in segs {
-        match out.last_mut() {
-            Some(last) if s.lend <= last.rend + 1 => {
-                if s.rend > last.rend {
-                    last.rend = s.rend;
-                }
-            }
-            _ => out.push(s),
-        }
-    }
-    out
 }
 
 fn total_len(segs: &[Coordset]) -> i64 {
@@ -375,6 +472,21 @@ fn is_terminal_truncation(
     ann.partial3 && shares_junctions(iso_exons, iso_introns, cds, cds_introns)
 }
 
+/// Whether an isoform hosting model CDS `cds` (annotation `ann`) is a genuine
+/// alternative to it — one that earns its own mRNA: it diverges within the CDS
+/// (`coding_altered`, so not CDS-identical) and is not a mere terminal truncation
+/// ([`is_terminal_truncation`]), i.e. it introduces a novel splice junction. The single
+/// predicate shared by [`annotate`] and [`augment`].
+fn is_genuine_alternative(
+    iso_exons: &[Coordset],
+    iso_introns: &[Coordset],
+    cds: &[Coordset],
+    cds_introns: &[Coordset],
+    ann: &CodingAnnotation,
+) -> bool {
+    ann.coding_altered && !is_terminal_truncation(iso_exons, iso_introns, cds, cds_introns, ann)
+}
+
 /// A transcript isoform as an alternative mRNA, with the consensus CDS grafted on.
 fn iso_mrna(iso: &Isoform, ann: &CodingAnnotation, gene_id: &str, n: usize) -> OutTranscript {
     let mut attrs = vec![
@@ -401,12 +513,8 @@ fn iso_mrna(iso: &Isoform, ann: &CodingAnnotation, gene_id: &str, n: usize) -> O
         five_utr: ann.five_utr.clone(),
         three_utr: ann.three_utr.clone(),
         attrs,
+        cds_start_phase: 0,
     }
-}
-
-fn gkey(g: &CalledGene) -> (String, i64, i64, char) {
-    let (lend, rend) = g.span();
-    (g.contig.clone(), lend, rend, g.orient.to_char())
 }
 
 fn span_of(transcripts: &[OutTranscript]) -> (i64, i64) {
@@ -459,11 +567,14 @@ mod tests {
             partial3: false,
             score: 100.0,
             support: SupportFlags {
+                raw_noncoding: 0.0,
+                noncoding_equivalent: 0.0,
                 score_ratio: 5.0,
                 coding_length: 60,
                 low_support: false,
             },
             promoted: false,
+            features: vec![],
         }
     }
 
@@ -579,7 +690,11 @@ mod tests {
         assert_eq!(out.len(), 1);
         let mrnas = &out[0].transcripts;
         // Exactly one mRNA: the consensus, now carrying the isoform's UTRs.
-        assert_eq!(mrnas.len(), 1, "CDS-identical UTR isoform must not duplicate the consensus");
+        assert_eq!(
+            mrnas.len(),
+            1,
+            "CDS-identical UTR isoform must not duplicate the consensus"
+        );
         let m = &mrnas[0];
         assert!(m.transcript_id.ends_with(".consensus"));
         assert!(
@@ -708,8 +823,15 @@ mod tests {
         assert!(m.transcript_id.ends_with(".consensus"));
         assert_eq!(m.cds, vec![cs(20, 40), cs(60, 90)], "CDS unchanged");
         assert_eq!(m.five_utr, vec![cs(10, 19)], "fragment's 5'UTR salvaged");
-        assert!(m.three_utr.is_empty(), "no bogus 3'UTR from the truncated end");
-        assert_eq!(m.exons.first().unwrap().lend, 10, "5'-terminal exon extended");
+        assert!(
+            m.three_utr.is_empty(),
+            "no bogus 3'UTR from the truncated end"
+        );
+        assert_eq!(
+            m.exons.first().unwrap().lend,
+            10,
+            "5'-terminal exon extended"
+        );
     }
 
     #[test]
@@ -738,7 +860,11 @@ mod tests {
         let (out, _e) = annotate(&[gene], asr, &genome, &GeneticCode::default());
         assert_eq!(out.len(), 1);
         let mrnas = &out[0].transcripts;
-        assert_eq!(mrnas.len(), 1, "a 5'-truncated UTR donor is not its own mRNA");
+        assert_eq!(
+            mrnas.len(),
+            1,
+            "a 5'-truncated UTR donor is not its own mRNA"
+        );
         let m = &mrnas[0];
         assert_eq!(m.cds, vec![cs(20, 40), cs(60, 90)], "CDS unchanged");
         assert_eq!(
@@ -747,6 +873,247 @@ mod tests {
             "3'UTR recovered from a non-grafting transcript"
         );
         assert!(m.five_utr.is_empty());
-        assert_eq!(m.exons.last().unwrap().rend, 110, "3'-terminal exon extended");
+        assert_eq!(
+            m.exons.last().unwrap().rend,
+            110,
+            "3'-terminal exon extended"
+        );
+    }
+
+    // ---- augment (assemble --models) ----
+
+    fn mrna(tid: &str, exons: &[(i64, i64)], cds: &[(i64, i64)], phase: u8) -> OutTranscript {
+        OutTranscript {
+            transcript_id: tid.into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            exons: exons.iter().map(|&(l, r)| cs(l, r)).collect(),
+            cds: cds.iter().map(|&(l, r)| cs(l, r)).collect(),
+            five_utr: vec![],
+            three_utr: vec![],
+            attrs: vec![("Name".into(), vec![format!("{tid}-name")])],
+            cds_start_phase: phase,
+        }
+    }
+
+    fn model(id: &str, transcripts: Vec<OutTranscript>) -> OutGene {
+        OutGene {
+            gene_id: id.into(),
+            contig: "chr1".into(),
+            strand: Strand::Plus,
+            lend: span_of(&transcripts).0,
+            rend: span_of(&transcripts).1,
+            attrs: vec![("Note".into(), vec!["kept".into()])],
+            transcripts,
+        }
+    }
+
+    /// One locus per isoform, on the isoform's strand.
+    fn asr_of(isoforms: Vec<Isoform>) -> AltSpliceResult {
+        let loci = isoforms
+            .iter()
+            .enumerate()
+            .map(|(i, iso)| Locus {
+                id: format!("L{i}"),
+                contig: iso.contig.clone(),
+                strand: iso.strand,
+                isoform_indices: vec![i],
+            })
+            .collect();
+        AltSpliceResult {
+            isoforms,
+            loci,
+            events: vec![],
+        }
+    }
+
+    fn atg_genome(len: usize, at: usize) -> Fasta {
+        let mut g = vec![b'C'; len];
+        g[at - 1..at + 2].copy_from_slice(b"ATG");
+        write_fasta(&g)
+    }
+
+    fn tids(g: &OutGene) -> Vec<&str> {
+        g.transcripts
+            .iter()
+            .map(|t| t.transcript_id.as_str())
+            .collect()
+    }
+
+    fn attr<'a>(t: &'a OutTranscript, k: &str) -> Option<&'a str> {
+        t.attrs
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v[0].as_str())
+    }
+
+    fn render(genes: &[OutGene]) -> String {
+        let mut buf = Vec::new();
+        crate::io::writer_gff3::write(&mut buf, genes).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn augment_keeps_base_verbatim_and_skips_cds_identical_utr_isoform() {
+        let genome = atg_genome(110, 10);
+        let input = || {
+            vec![model(
+                "g",
+                vec![mrna(
+                    "g.t1",
+                    &[(10, 40), (60, 90)],
+                    &[(10, 40), (60, 90)],
+                    0,
+                )],
+            )]
+        };
+        // CDS-identical, UTR-extended isoform: not appended, and NO UTR salvage
+        let asr = asr_of(vec![iso("t1", &[(1, 40), (60, 100)])]);
+        let (out, _) = augment(input(), asr, &genome, &GeneticCode::default());
+        assert_eq!(render(&out), render(&input()), "gene set emitted verbatim");
+    }
+
+    #[test]
+    fn augment_appends_novel_junction_isoform_and_widens_span() {
+        let genome = atg_genome(110, 10);
+        let input = vec![model(
+            "g",
+            vec![mrna(
+                "g.t1",
+                &[(10, 40), (60, 90)],
+                &[(10, 40), (60, 90)],
+                0,
+            )],
+        )];
+        let base = render(&input);
+        let asr = asr_of(vec![iso("ri", &[(5, 95)])]); // retained intron, extended ends
+        let (out, _) = augment(input, asr, &genome, &GeneticCode::default());
+        assert_eq!(tids(&out[0]), vec!["g.t1", "g.iso1"]);
+        let t = &out[0].transcripts[1];
+        assert_eq!(attr(t, "support"), Some("transcript_isoform"));
+        assert_eq!(attr(t, "coding_altered"), Some("true"));
+        assert_eq!(
+            t.cds.first().unwrap().lend,
+            10,
+            "CDS grafted from the model start"
+        );
+        assert_eq!((out[0].lend, out[0].rend), (5, 95), "span widened");
+        // the input block is a verbatim prefix apart from the widened gene row
+        let rendered = render(&out);
+        let body = |s: &str| {
+            s.lines()
+                .skip(2)
+                .take(4)
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(body(&rendered), body(&base));
+    }
+
+    #[test]
+    fn augment_skips_terminal_truncation() {
+        let genome = atg_genome(150, 10);
+        let ex = [(10, 40), (60, 90), (110, 140)];
+        let input = vec![model("g", vec![mrna("g.t1", &ex, &ex, 0)])];
+        let asr = asr_of(vec![iso("frag", &[(10, 40), (60, 90)])]);
+        let (out, _) = augment(input, asr, &genome, &GeneticCode::default());
+        assert_eq!(tids(&out[0]), vec!["g.t1"]);
+    }
+
+    #[test]
+    fn augment_skips_opposite_strand_and_unattached_isoforms() {
+        let genome = atg_genome(400, 10);
+        let input = vec![model(
+            "g",
+            vec![mrna(
+                "g.t1",
+                &[(10, 40), (60, 90)],
+                &[(10, 40), (60, 90)],
+                0,
+            )],
+        )];
+        let mut minus = iso("minus", &[(10, 90)]);
+        minus.strand = Strand::Minus;
+        let far = iso("far", &[(200, 250), (300, 350)]);
+        let (out, _) = augment(
+            input,
+            asr_of(vec![minus, far]),
+            &genome,
+            &GeneticCode::default(),
+        );
+        assert_eq!(out.len(), 1, "an isoform overlapping no model is dropped");
+        assert_eq!(tids(&out[0]), vec!["g.t1"]);
+    }
+
+    #[test]
+    fn augment_dedups_against_every_mrna_of_the_gene() {
+        let genome = atg_genome(150, 10);
+        let full = [(10, 40), (60, 90), (110, 140)];
+        let skip = [(10, 40), (110, 140)];
+        let input = vec![model(
+            "g",
+            vec![mrna("g.t1", &full, &full, 0), mrna("g.t2", &skip, &skip, 0)],
+        )];
+        // `same2` is the second mRNA's structure (novel vs the primary, identical to t2):
+        // not appended. `ri` retains the first intron: appended once.
+        let asr = asr_of(vec![
+            iso("same2", &skip),
+            iso("ri", &[(10, 90), (110, 140)]),
+        ]);
+        let (out, _) = augment(input, asr, &genome, &GeneticCode::default());
+        assert_eq!(tids(&out[0]), vec!["g.t1", "g.t2", "g.iso1"]);
+        assert_eq!(out[0].transcripts[2].exons, vec![cs(10, 90), cs(110, 140)]);
+    }
+
+    #[test]
+    fn augment_iso_id_avoids_existing_ids() {
+        let genome = atg_genome(110, 10);
+        let input = vec![model(
+            "g",
+            vec![
+                mrna("g.t1", &[(10, 40), (60, 90)], &[(10, 40), (60, 90)], 0),
+                mrna("g.iso1", &[(10, 40), (60, 90)], &[], 0), // non-coding, id taken
+            ],
+        )];
+        let asr = asr_of(vec![iso("ri", &[(10, 90)])]);
+        let (out, _) = augment(input, asr, &genome, &GeneticCode::default());
+        assert_eq!(tids(&out[0]), vec!["g.t1", "g.iso1", "g.iso2"]);
+    }
+
+    #[test]
+    fn augment_projects_a_five_prime_partial_model_in_frame() {
+        // 5'-partial model: CDS rows start at 10 with phase 1, so the first complete
+        // codon is at 11. A stop TAA at 41..43 is in frame from 11 (30 bases on) but not
+        // from 10, so the retained-intron isoform's projected CDS must end exactly there.
+        let mut g = vec![b'C'; 110];
+        g[40..43].copy_from_slice(b"TAA");
+        let genome = write_fasta(&g);
+        let input = vec![model(
+            "g",
+            vec![mrna(
+                "g.t1",
+                &[(10, 40), (60, 90)],
+                &[(10, 40), (60, 90)],
+                1,
+            )],
+        )];
+        let asr = asr_of(vec![iso("ri", &[(10, 90)])]);
+        let (out, _) = augment(input, asr, &genome, &GeneticCode::default());
+        assert_eq!(tids(&out[0]), vec!["g.t1", "g.iso1"]);
+        let t = &out[0].transcripts[1];
+        assert_eq!(t.cds, vec![cs(11, 43)], "projected from the in-frame start");
+        assert_eq!(attr(t, "partial3"), Some("false"), "hit the in-frame stop");
+        assert_eq!(out[0].transcripts[0].cds_start_phase, 1, "input phase kept");
+    }
+
+    #[test]
+    fn cds_model_shifts_the_start_into_frame_on_both_strands() {
+        let cds = [cs(10, 40), cs(60, 90)];
+        let p = cds_model("m", "chr1", Strand::Plus, &cds, 2).unwrap();
+        assert_eq!((p.start_genomic, p.stop_genomic), (12, 90));
+        let m = cds_model("m", "chr1", Strand::Minus, &cds, 1).unwrap();
+        assert_eq!((m.start_genomic, m.stop_genomic), (89, 10));
+        let z = cds_model("m", "chr1", Strand::Minus, &cds, 0).unwrap();
+        assert_eq!((z.start_genomic, z.stop_genomic), (90, 10));
     }
 }

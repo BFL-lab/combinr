@@ -56,6 +56,30 @@ pub struct CalledGene {
     /// True for a transcript-ORF gene recovered at a locus with no consensus CDS
     /// (`--promote-transcript-orfs`), vs. a trellis-derived consensus gene.
     pub promoted: bool,
+    /// Per-exon / per-intron evidence attribution for the evidence report, in ascending
+    /// forward `lend` order.
+    pub features: Vec<FeatureSupport>,
+}
+
+/// One exon or intron of a called gene with the evidence supporting it (forward genomic
+/// coordinates). Rendered by [`crate::consensus::report`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeatureSupport {
+    pub coords: Coordset,
+    pub kind: FeatureKind,
+    /// `(accession, ev_type)` of each supporting evidence chain, in insertion order.
+    pub evidence: Vec<(String, String)>,
+}
+
+/// An exon (typed, with EVM frames: 1-3 forward, 4-6 reverse) or an intron.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FeatureKind {
+    Exon {
+        exon_type: ExonType,
+        start_frame: u8,
+        end_frame: u8,
+    },
+    Intron,
 }
 
 impl CalledGene {
@@ -299,7 +323,45 @@ fn resolve(
         score: g.score,
         support,
         promoted: false,
+        features: path_features(g, rd, transpose_hi),
     }
+}
+
+/// The evidence attribution of a trellis gene's path: each path exon (its candidate's
+/// type, frames and evidence) and each intron between consecutive path exons. Intron
+/// evidence is looked up in the pass's WORKING coordinates (where `rd.introns` is keyed),
+/// and only then are the coordinates transposed to forward space for the minus pass
+/// (whose frames become EVM's reverse 4-6).
+fn path_features(
+    g: &ConsensusGene,
+    rd: &RegionData,
+    transpose_hi: Option<i64>,
+) -> Vec<FeatureSupport> {
+    let to_fwd = |c: Coordset| transpose_hi.map_or(c, |hi| c.reflect(hi));
+    let frame_shift = if transpose_hi.is_some() { 3 } else { 0 };
+    let mut features = Vec::with_capacity(2 * g.exon_indices.len());
+    for (k, &i) in g.exon_indices.iter().enumerate() {
+        let ex = &rd.exons[i];
+        if k > 0 {
+            let gap = rd.exons[g.exon_indices[k - 1]].coords.gap_to(&ex.coords);
+            features.push(FeatureSupport {
+                coords: to_fwd(gap),
+                kind: FeatureKind::Intron,
+                evidence: rd.introns.evidence((gap.lend, gap.rend)).to_vec(),
+            });
+        }
+        features.push(FeatureSupport {
+            coords: to_fwd(ex.coords),
+            kind: FeatureKind::Exon {
+                exon_type: ex.exon_type,
+                start_frame: ex.start_frame + frame_shift,
+                end_frame: ex.end_frame + frame_shift,
+            },
+            evidence: ex.evidence.clone(),
+        });
+    }
+    features.sort_by_key(|f| f.coords.lend);
+    features
 }
 
 /// Build the best path over `range`, flag low support, keep the retained genes, then
@@ -560,6 +622,66 @@ mod tests {
         consensus_region(&region, &chains, g, &cand, &filt, &w, &eng, &[])
             .into_iter()
             .find(|x| x.orient == orient)
+    }
+
+    fn ev_g() -> Vec<(String, String)> {
+        vec![("g".to_string(), "fgenesh".to_string())]
+    }
+
+    fn exon_feat(l: i64, r: i64, t: ExonType, sf: u8, ef: u8) -> FeatureSupport {
+        FeatureSupport {
+            coords: Coordset::new(l, r),
+            kind: FeatureKind::Exon {
+                exon_type: t,
+                start_frame: sf,
+                end_frame: ef,
+            },
+            evidence: ev_g(),
+        }
+    }
+
+    fn intron_feat(l: i64, r: i64) -> FeatureSupport {
+        FeatureSupport {
+            coords: Coordset::new(l, r),
+            kind: FeatureKind::Intron,
+            evidence: ev_g(),
+        }
+    }
+
+    #[test]
+    fn plus_gene_features_carry_exon_and_intron_evidence() {
+        let g = genome_with(200, &[]);
+        let gene = call_single(&g, &[(10, 18), (50, 60)], Strand::Plus).unwrap();
+        assert_eq!(
+            gene.features,
+            vec![
+                exon_feat(10, 18, ExonType::Initial, 1, 3),
+                intron_feat(19, 49),
+                exon_feat(50, 60, ExonType::Terminal, 1, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn minus_gene_features_transposed_with_reverse_frames() {
+        // Forward exons A=50..58 (3', terminal) and B=89..98 (5', initial), intron 59..88.
+        // In the RC-local pass (hi = 200) the intron is keyed 113..142, so a lookup with
+        // the forward coordinates would find no evidence. Frames: B initial 1->1 (len 10),
+        // A terminal starts at cum 10 -> 2, ends 1; reverse encoding adds 3.
+        let g = genome_with(200, &[]);
+        let gene = call_single(&g, &[(50, 58), (89, 98)], Strand::Minus).unwrap();
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(50, 58), Coordset::new(89, 98)]
+        );
+        assert_eq!(
+            gene.features,
+            vec![
+                exon_feat(50, 58, ExonType::Terminal, 5, 4),
+                intron_feat(59, 88),
+                exon_feat(89, 98, ExonType::Initial, 4, 4),
+            ]
+        );
     }
 
     #[test]

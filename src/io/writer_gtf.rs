@@ -54,7 +54,7 @@ fn write_transcript<W: Write>(w: &mut W, gene_id: &str, t: &OutTranscript) -> io
                 t.contig, seg.lend, seg.rend
             )?;
         }
-        let phases = cds_phases(&t.cds, t.strand);
+        let phases = cds_phases(&t.cds, t.strand, t.cds_start_phase);
         for seg in &t.cds {
             let phase = phases[&(seg.lend, seg.rend)];
             writeln!(

@@ -7,7 +7,8 @@ use crate::cluster::cluster_alignments;
 use crate::consensus::evidence::load_evidence;
 use crate::consensus::region::build_regions;
 use crate::consensus::{
-    CalledGene, CandidateParams, EngineParams, FilterParams, Weights, consensus_region,
+    CalledGene, CandidateParams, EngineParams, EvClass, EvidenceChain, FilterParams, Weights,
+    consensus_region,
 };
 use crate::error::{CombinrError, Result};
 use crate::filter::{self, Filters};
@@ -16,6 +17,7 @@ use crate::io::load_sources;
 use crate::io::out_model::OutGene;
 use crate::orf::{GeneticCode, ReconcileResult, parse_cds_models, reconcile};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// PASA pairwise-compatibility fuzz default (bp) used when the consensus path
@@ -105,6 +107,44 @@ pub fn reconcile_sources(
     Ok((asr.isoforms, asr.loci, recon))
 }
 
+/// Counts reported by [`augment_sources`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AugmentStats {
+    /// Genes in the input gene-model GFF3 (every one is emitted).
+    pub input_genes: usize,
+    /// mRNAs in the input gene-model GFF3 (every one is emitted verbatim).
+    pub input_mrnas: usize,
+    /// Isoform mRNAs appended: output mRNAs minus input mRNAs.
+    pub appended: usize,
+}
+
+/// `assemble --models`: analyze the transcript sources (assembly + alt-splice), load an
+/// existing gene-model GFF3, and append each gene's genuine alternative isoforms as extra
+/// mRNAs, the input genes kept verbatim (see [`crate::consensus::altsplice::augment`]).
+/// Returns the output genes, the region-tagged alt-splice events and the counts.
+pub fn augment_sources(
+    paths: &[PathBuf],
+    models: &Path,
+    genome: &Path,
+    fuzzlength: i64,
+    min_overlap_frac: f64,
+    filters: &Filters,
+    code: GeneticCode,
+) -> Result<(Vec<OutGene>, Vec<EventRecord>, AugmentStats)> {
+    let asr = analyze_sources(paths, fuzzlength, min_overlap_frac, filters)?;
+    let models = crate::io::gene_models::load_gene_models(models)?;
+    let mrnas = |genes: &[OutGene]| genes.iter().map(|g| g.transcripts.len()).sum::<usize>();
+    let (input_genes, input_mrnas) = (models.len(), mrnas(&models));
+    let genome = Fasta::load(genome)?;
+    let (genes, events) = crate::consensus::altsplice::augment(models, asr, &genome, &code);
+    let stats = AugmentStats {
+        input_genes,
+        input_mrnas,
+        appended: mrnas(&genes) - input_mrnas,
+    };
+    Ok((genes, events, stats))
+}
+
 /// Configuration for the EVM-style `consensus` path.
 pub struct ConsensusConfig {
     pub weights: PathBuf,
@@ -182,14 +222,17 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
         Some(path) => crate::consensus::repeats::parse_repeats(path)?,
         None => std::collections::HashMap::new(),
     };
-    let empty: Vec<crate::model::Coordset> = Vec::new();
 
     let regions = build_regions(&chains, cfg.flank);
     // Regions are independent → process in parallel (as `assemble_sources` does).
     let per_region: Vec<Vec<CalledGene>> = regions
         .par_iter()
         .map(|r| {
-            let region_mask = mask.get(&r.contig).unwrap_or(&empty);
+            // Only the repeats intersecting this region (the per-contig lists are sorted
+            // and merged by `parse_repeats`; `set_masked` clips to the engine's window).
+            let region_mask = mask.get(&r.contig).map_or(&[][..], |m| {
+                crate::consensus::repeats::overlapping(m, r.span)
+            });
             consensus_region(
                 r,
                 &chains,
@@ -219,6 +262,7 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
             &genome,
             &code,
             cfg.min_coding_length,
+            &transcript_sources(&chains),
         );
         Some(asr)
     } else {
@@ -233,16 +277,37 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
     })
 }
 
+/// Transcript accession → GFF column-2 source, from the loaded transcript chains: the
+/// evidence attribution for promoted transcript-ORF genes.
+fn transcript_sources(chains: &[EvidenceChain]) -> HashMap<String, String> {
+    chains
+        .iter()
+        .filter(|c| c.ev_class == EvClass::Transcript)
+        .map(|c| (c.accession.clone(), c.ev_type.clone()))
+        .collect()
+}
+
 /// Build consensus gene models: parse weights, ingest weighted evidence, cluster into
 /// per-contig regions, and run the both-strand trellis on each region in parallel.
 pub fn consensus_sources(cfg: &ConsensusConfig) -> Result<Vec<CalledGene>> {
     Ok(consensus_inner(cfg)?.genes)
 }
 
+/// Output of [`consensus_with_isoforms`].
+pub struct ConsensusIsoforms {
+    /// The called consensus genes (for the evidence report; IDs via
+    /// [`crate::consensus::output::ordered_with_ids`], identical to `out_genes`').
+    pub genes: Vec<CalledGene>,
+    /// Consensus mRNA + alternative-isoform mRNAs per gene.
+    pub out_genes: Vec<OutGene>,
+    /// Region-tagged alt-splice events.
+    pub events: Vec<EventRecord>,
+}
+
 /// `consensus --alt-splice`: build the consensus genes, then attach each locus's
 /// alternative transcript isoforms as extra mRNAs (CDS grafted from the consensus). Returns
-/// the output genes and the region-tagged alt-splice events.
-pub fn consensus_with_isoforms(cfg: &ConsensusConfig) -> Result<(Vec<OutGene>, Vec<EventRecord>)> {
+/// the called genes, the output genes and the region-tagged alt-splice events.
+pub fn consensus_with_isoforms(cfg: &ConsensusConfig) -> Result<ConsensusIsoforms> {
     let ConsensusInner {
         genes,
         genome,
@@ -260,7 +325,10 @@ pub fn consensus_with_isoforms(cfg: &ConsensusConfig) -> Result<(Vec<OutGene>, V
             &Filters::none(),
         )?,
     };
-    Ok(crate::consensus::altsplice::annotate(
-        &genes, asr, &genome, &code,
-    ))
+    let (out_genes, events) = crate::consensus::altsplice::annotate(&genes, asr, &genome, &code);
+    Ok(ConsensusIsoforms {
+        genes,
+        out_genes,
+        events,
+    })
 }

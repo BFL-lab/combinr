@@ -25,6 +25,10 @@ pub struct FilterParams {
 /// Support metrics for one gene.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SupportFlags {
+    /// Intergenic (noncoding) score over the gene span, before the divide-by-zero floor.
+    pub raw_noncoding: f64,
+    /// `raw_noncoding`, floored at `0.0001 × max(score, 1)`; the S-ratio denominator.
+    pub noncoding_equivalent: f64,
     pub score_ratio: f64,
     pub coding_length: i64,
     pub low_support: bool,
@@ -68,6 +72,8 @@ pub fn assess(
 
     let low_support = score_ratio < p.min_score_ratio || coding_length < p.min_coding_length;
     SupportFlags {
+        raw_noncoding,
+        noncoding_equivalent: noncoding_equiv,
         score_ratio,
         coding_length,
         low_support,
@@ -138,5 +144,7 @@ mod tests {
         let s = assess(&g, &exons, &v, &params());
         assert!(s.score_ratio < 0.75);
         assert!(s.low_support);
+        assert_eq!(s.raw_noncoding, 301.0);
+        assert_eq!(s.noncoding_equivalent, 301.0);
     }
 }

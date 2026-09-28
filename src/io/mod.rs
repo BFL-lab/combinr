@@ -5,6 +5,7 @@
 
 pub mod bam;
 pub mod fasta;
+pub mod gene_models;
 pub(crate) mod gff;
 pub mod gff3;
 pub mod gtf;

@@ -219,12 +219,22 @@ mod tests {
         // len 1001) overlap only at the tips (101 bp ≈ 10% of the shorter). At the
         // default 0.0 they share a locus; at 30% they split into two genes.
         let a = assemble_cluster(
-            &[spliced("a", "chr1", Strand::Plus, &[(100, 200), (300, 1100)])],
+            &[spliced(
+                "a",
+                "chr1",
+                Strand::Plus,
+                &[(100, 200), (300, 1100)],
+            )],
             20,
         )
         .unwrap();
         let b = assemble_cluster(
-            &[spliced("b", "chr1", Strand::Plus, &[(1000, 1100), (1300, 2000)])],
+            &[spliced(
+                "b",
+                "chr1",
+                Strand::Plus,
+                &[(1000, 1100), (1300, 2000)],
+            )],
             20,
         )
         .unwrap();
@@ -242,12 +252,22 @@ mod tests {
         // A short isoform fully inside a long one (overlap = 100% of the shorter span)
         // still shares the locus even at a high threshold.
         let long = assemble_cluster(
-            &[spliced("long", "chr1", Strand::Plus, &[(100, 200), (2000, 2100)])],
+            &[spliced(
+                "long",
+                "chr1",
+                Strand::Plus,
+                &[(100, 200), (2000, 2100)],
+            )],
             20,
         )
         .unwrap();
         let short = assemble_cluster(
-            &[spliced("short", "chr1", Strand::Plus, &[(500, 600), (700, 800)])],
+            &[spliced(
+                "short",
+                "chr1",
+                Strand::Plus,
+                &[(500, 600), (700, 800)],
+            )],
             20,
         )
         .unwrap();
