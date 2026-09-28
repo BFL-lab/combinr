@@ -94,6 +94,11 @@ fn recover_transcript_loci(
 }
 
 /// Build a promoted gene from an isoform's longest ORF, or `None` if too short / no ORF.
+///
+/// `coding_length` (which gates `min_coding_length` and is the score) is the CDS length,
+/// matching the trellis path, whose coding_length counts the leading partial codon
+/// because the CDS starts at the first exon base. Genes with a start codon (phase 0)
+/// are unaffected.
 fn orf_gene(
     iso: &Isoform,
     genome: &Fasta,
@@ -104,10 +109,6 @@ fn orf_gene(
     let st = SplicedTranscript::new(&iso.exons, iso.strand);
     let seq = st.sequence(genome, &iso.contig)?;
     let orf = find_longest_orf(&seq, code)?;
-    let coding_length = orf.len() as i64;
-    if coding_length < min_coding_length {
-        return None;
-    }
     // A start-less ORF begins at its frame offset (0-2) from the transcript's 5' end; as
     // on the trellis path its CDS starts at the first base, the leading partial codon
     // carried as the first CDS row's phase (GFF3), not as a 5'UTR.
@@ -118,6 +119,10 @@ fn orf_gene(
     };
     let (cds, five_utr, three_utr) = st.cds_and_utrs(cds_t_start, orf.t_end);
     if cds.is_empty() {
+        return None;
+    }
+    let coding_length: i64 = cds.iter().map(|c| c.len()).sum();
+    if coding_length < min_coding_length {
         return None;
     }
     let evidence: Vec<(String, String)> = iso
@@ -372,14 +377,27 @@ mod tests {
         assert!(gene.five_utr.is_empty());
         assert_eq!(gene.cds_start_phase, 1);
         assert_eq!(
-            gene.support.coding_length, 18,
-            "complete codons only, as before"
+            gene.support.coding_length, 19,
+            "the CDS length, partial codon included"
         );
         // the reported frame stays the codon position of the CDS's first base
         assert!(matches!(
             gene.features[0].kind,
             FeatureKind::Exon { start_frame: 3, .. }
         ));
+        // the min_coding_length gate uses the CDS length (19)
+        let promote = |min| {
+            promote_and_merge(
+                vec![],
+                &asr,
+                &genome,
+                &GeneticCode::default(),
+                min,
+                &HashMap::new(),
+            )
+        };
+        assert_eq!(promote(19).len(), 1);
+        assert!(promote(20).is_empty());
     }
 
     #[test]
