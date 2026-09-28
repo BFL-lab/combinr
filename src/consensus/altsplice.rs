@@ -579,7 +579,11 @@ mod tests {
         assert_eq!(out.len(), 1);
         let mrnas = &out[0].transcripts;
         // Exactly one mRNA: the consensus, now carrying the isoform's UTRs.
-        assert_eq!(mrnas.len(), 1, "CDS-identical UTR isoform must not duplicate the consensus");
+        assert_eq!(
+            mrnas.len(),
+            1,
+            "CDS-identical UTR isoform must not duplicate the consensus"
+        );
         let m = &mrnas[0];
         assert!(m.transcript_id.ends_with(".consensus"));
         assert!(
@@ -708,8 +712,15 @@ mod tests {
         assert!(m.transcript_id.ends_with(".consensus"));
         assert_eq!(m.cds, vec![cs(20, 40), cs(60, 90)], "CDS unchanged");
         assert_eq!(m.five_utr, vec![cs(10, 19)], "fragment's 5'UTR salvaged");
-        assert!(m.three_utr.is_empty(), "no bogus 3'UTR from the truncated end");
-        assert_eq!(m.exons.first().unwrap().lend, 10, "5'-terminal exon extended");
+        assert!(
+            m.three_utr.is_empty(),
+            "no bogus 3'UTR from the truncated end"
+        );
+        assert_eq!(
+            m.exons.first().unwrap().lend,
+            10,
+            "5'-terminal exon extended"
+        );
     }
 
     #[test]
@@ -738,7 +749,11 @@ mod tests {
         let (out, _e) = annotate(&[gene], asr, &genome, &GeneticCode::default());
         assert_eq!(out.len(), 1);
         let mrnas = &out[0].transcripts;
-        assert_eq!(mrnas.len(), 1, "a 5'-truncated UTR donor is not its own mRNA");
+        assert_eq!(
+            mrnas.len(),
+            1,
+            "a 5'-truncated UTR donor is not its own mRNA"
+        );
         let m = &mrnas[0];
         assert_eq!(m.cds, vec![cs(20, 40), cs(60, 90)], "CDS unchanged");
         assert_eq!(
@@ -747,6 +762,10 @@ mod tests {
             "3'UTR recovered from a non-grafting transcript"
         );
         assert!(m.five_utr.is_empty());
-        assert_eq!(m.exons.last().unwrap().rend, 110, "3'-terminal exon extended");
+        assert_eq!(
+            m.exons.last().unwrap().rend,
+            110,
+            "3'-terminal exon extended"
+        );
     }
 }
