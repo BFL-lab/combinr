@@ -93,7 +93,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BFL-lab/combinr/release
 specific version by using its tag instead:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BFL-lab/combinr/releases/download/v0.1.1/combinr-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/BFL-lab/combinr/releases/download/v0.2.0/combinr-installer.sh | sh
 ```
 
 Prefer to do it by hand (or on Windows)? Grab the tarball for your target — or the
