@@ -229,6 +229,21 @@ pub struct ConsensusTuning {
     /// Boost intergenic scores near start/stop evidence-density peaks. Off by default.
     #[arg(long)]
     pub peak_augment: bool,
+    /// Cap on the unmasked length (bp) contributing to any single intron's score, or
+    /// `auto` for smooth logarithmic scaling (linear up to 1 kb, log beyond).
+    /// 0 = uncapped (the default). Anti-fusion knob for repeat-rich genomes: without a
+    /// cap, a giant intron from a misassembled transcript outweighs the intergenic signal
+    /// and the trellis absorbs the neighbouring gene. 1000-5000 works well for plants;
+    /// vertebrates with genuinely long introns should use 10000+ or auto.
+    #[arg(long, default_value = "0")]
+    pub intron_score_cap: combinr::consensus::IntronScoreScale,
+    /// Require an ATG start codon (EVM's canonical START gate, limited to the start
+    /// codon): prediction exons typed initial/single whose start codon is not ATG are
+    /// demoted so they cannot begin a gene, and a called gene whose CDS does not start
+    /// with ATG is trimmed in-frame to the first ATG (within 60 codons) or flagged
+    /// partial5. Off by default.
+    #[arg(long)]
+    pub require_atg_start: bool,
 }
 
 #[derive(Parser, Debug)]

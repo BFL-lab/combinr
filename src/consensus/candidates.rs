@@ -34,7 +34,68 @@ use crate::orf::GeneticCode;
 use std::collections::HashMap;
 
 /// Max bp to extend a terminal alignment segment downstream looking for a stop codon.
-const MAX_TERMINAL_EXTEND: i64 = 10_000;
+pub(crate) const MAX_TERMINAL_EXTEND: i64 = 10_000;
+
+/// How the unmasked length of one intron maps to its score contribution
+/// (`--intron-score-cap`), per intron per supporting chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntronScoreScale {
+    /// `weight x len` (EVM behaviour; the default).
+    Linear,
+    /// `weight x min(len, cap)`.
+    Cap(i64),
+    /// `weight x len` up to 1 kb, then logarithmic
+    /// (`weight x 1 kb x (1 + ln(len / 1 kb))`): giant introns keep scoring more but
+    /// can no longer outscore gene-splitting signals by orders of magnitude.
+    Smooth,
+}
+
+/// Knee (bp) for [`IntronScoreScale::Smooth`]: introns up to this length score linearly.
+pub(crate) const INTRON_SMOOTH_KNEE: i64 = 1_000;
+
+impl IntronScoreScale {
+    /// The length contributing to an intron's score under this scaling.
+    pub fn scored_len(self, len: i64) -> i64 {
+        match self {
+            Self::Linear => len,
+            Self::Cap(cap) => len.min(cap),
+            Self::Smooth => {
+                if len <= INTRON_SMOOTH_KNEE {
+                    len
+                } else {
+                    let k = INTRON_SMOOTH_KNEE as f64;
+                    (k * (1.0 + (len as f64 / k).ln())).round() as i64
+                }
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for IntronScoreScale {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "0" | "off" => Ok(Self::Linear),
+            "auto" => Ok(Self::Smooth),
+            _ => match s.parse::<i64>() {
+                Ok(n) if n > 0 => Ok(Self::Cap(n)),
+                _ => Err(format!(
+                    "invalid --intron-score-cap {s:?} (expected 0, auto, or a bp cap)"
+                )),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for IntronScoreScale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Linear => write!(f, "0"),
+            Self::Cap(n) => write!(f, "{n}"),
+            Self::Smooth => write!(f, "auto"),
+        }
+    }
+}
 
 /// Tunables for candidate generation.
 #[derive(Clone, Copy, Debug)]
@@ -47,6 +108,14 @@ pub struct CandidateParams {
     /// Boost intergenic scores near start/stop evidence-density peaks
     /// (EVM `augment_intergenic_from_start_stop_peaks`).
     pub peak_augment: bool,
+    /// Demote initial/single prediction exons whose start codon is not ATG, so genes can
+    /// only begin at an ATG (EVM's canonical START gate, limited to the start codon).
+    pub require_atg_start: bool,
+    /// Cap on the unmasked length contributing to an intron's score. Anti-fusion knob
+    /// for repeat-rich genomes: without it, a giant intron from a misassembled
+    /// transcript outweighs any intergenic signal and the trellis absorbs the
+    /// neighbouring gene. `Cap(n)` hard-caps, `Smooth` scales logarithmically.
+    pub intron_score_scale: IntronScoreScale,
     /// Sum of all gene-prediction weights (EVM `SUM_GENEPRED_WEIGHTS`), the peak threshold
     /// and the augmented intergenic level.
     pub sum_genepred_weights: f64,
@@ -79,6 +148,8 @@ pub fn build_candidates(
         code: &params.code,
         min_intron_length: params.min_intron_length,
         extend_terminal_stop: params.extend_terminal_stop,
+        require_atg_start: params.require_atg_start,
+        intron_score_scale: params.intron_score_scale,
         sum_genepred_weights: params.sum_genepred_weights,
         vectors: RegionVectors::new(span.lend, len),
         introns: IntronScores::default(),
@@ -126,6 +197,8 @@ struct Builder<'a> {
     code: &'a GeneticCode,
     min_intron_length: i64,
     extend_terminal_stop: bool,
+    require_atg_start: bool,
+    intron_score_scale: IntronScoreScale,
     sum_genepred_weights: f64,
     vectors: RegionVectors,
     introns: IntronScores,
@@ -162,8 +235,19 @@ impl Builder<'_> {
             _ => 0,
         };
         for (i, seg) in chain.links.iter().enumerate() {
-            let exon_type = position_type(i, n);
+            let mut exon_type = position_type(i, n);
             let start_frame = (cum_len.rem_euclid(3) + 1) as u8;
+            // --require-atg-start: a gene can only begin at an ATG (EVM's canonical START
+            // gate, limited to the start codon). A prediction's initial/single exon whose
+            // start codon is not ATG (e.g. a 5'-partial transfer/homology model) is demoted
+            // to internal so the trellis starts from an ATG-bearing alternative — or leaves
+            // the gene 5'-partial for the engine's ATG-trim rescue.
+            if self.require_atg_start
+                && matches!(exon_type, ExonType::Initial | ExonType::Single)
+                && !self.starts_with_atg(*seg, start_frame)
+            {
+                exon_type = ExonType::Internal;
+            }
             if paints {
                 self.vectors.add_coverage(seg.lend, seg.rend, chain.weight);
             }
@@ -337,6 +421,19 @@ impl Builder<'_> {
         self.exons.push(exon);
     }
 
+    /// The codon at this exon's 5' start (in its `start_frame`) is ATG. Checked in the
+    /// pass's working genome (always forward-oriented).
+    fn starts_with_atg(&self, seg: Coordset, start_frame: u8) -> bool {
+        let s = seg.lend + frame_offset(start_frame) as i64;
+        if s + 2 > seg.rend {
+            return false; // exon too short to hold the start codon
+        }
+        self.genome
+            .subseq(&self.contig, s, s + 2)
+            .map(|c| c.eq_ignore_ascii_case(b"ATG"))
+            .unwrap_or(false)
+    }
+
     /// Two genome bases `[lend, rend]`, padded with `N` if out of bounds.
     fn boundary(&self, lend: i64, rend: i64) -> [u8; 2] {
         let s = self
@@ -378,8 +475,9 @@ impl Builder<'_> {
                 continue;
             }
             let unmasked = self.vectors.unmasked_len(intron.lend, intron.rend);
+            let scored = self.intron_score_scale.scored_len(unmasked);
             let key = (intron.lend, intron.rend);
-            self.introns.add(key, chain.weight, unmasked);
+            self.introns.add(key, chain.weight, scored);
             self.introns
                 .attribute(key, &chain.accession, &chain.ev_type);
         }
@@ -449,6 +547,8 @@ mod tests {
             code: GeneticCode::default(),
             extend_terminal_stop: false,
             peak_augment: false,
+            require_atg_start: false,
+            intron_score_scale: IntronScoreScale::Linear,
             sum_genepred_weights: 0.0,
         }
     }
@@ -627,6 +727,38 @@ mod tests {
     }
 
     #[test]
+    fn intron_score_scale_parses_and_scales() {
+        use std::str::FromStr;
+        assert_eq!(
+            IntronScoreScale::from_str("0"),
+            Ok(IntronScoreScale::Linear)
+        );
+        assert_eq!(
+            IntronScoreScale::from_str("auto"),
+            Ok(IntronScoreScale::Smooth)
+        );
+        assert_eq!(
+            IntronScoreScale::from_str("2000"),
+            Ok(IntronScoreScale::Cap(2000))
+        );
+        assert!(IntronScoreScale::from_str("-5").is_err());
+        assert!(IntronScoreScale::from_str("banana").is_err());
+
+        // linear and cap
+        assert_eq!(IntronScoreScale::Linear.scored_len(15_000), 15_000);
+        assert_eq!(IntronScoreScale::Cap(2000).scored_len(15_000), 2000);
+        // smooth: linear up to the 1 kb knee, logarithmic beyond
+        assert_eq!(IntronScoreScale::Smooth.scored_len(500), 500);
+        assert_eq!(IntronScoreScale::Smooth.scored_len(1_000), 1_000);
+        let s15k = IntronScoreScale::Smooth.scored_len(15_000);
+        assert!((3000..4500).contains(&s15k), "15 kb -> {s15k}"); // ~3708
+        let s50k = IntronScoreScale::Smooth.scored_len(50_000);
+        assert!((4500..5500).contains(&s50k), "50 kb -> {s50k}"); // ~4912
+        // monotone: longer introns still score more, but barely
+        assert!(s50k > s15k && s50k < 2 * s15k);
+    }
+
+    #[test]
     fn fully_masked_intron_is_still_registered() {
         // EVM parity: masking zeroes an intron's score but must not sever the trellis
         // connection (TE-filled introns are common in repeat-rich genomes)
@@ -643,6 +775,27 @@ mod tests {
             rd.introns.evidence((19, 49)),
             &[("acc".to_string(), "src".to_string())]
         );
+    }
+
+    #[test]
+    fn initial_exon_without_atg_is_demoted_when_required() {
+        let mut p = params();
+        p.require_atg_start = true;
+        // all-C genome: no ATG at 10..12 -> the initial exon is demoted to internal
+        let g = genome(70, &[(56, b"TAA")]);
+        let chains = vec![chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)])];
+        let rd = build_candidates(&region(&chains), &chains, &g, &p, &[]);
+        assert_eq!(
+            rd.exons[0].exon_type,
+            ExonType::Internal,
+            "no ATG at the start -> cannot begin a gene"
+        );
+        assert_eq!(rd.exons[1].exon_type, ExonType::Terminal);
+
+        // with an ATG at 10..12 the initial typing survives
+        let g2 = genome(70, &[(10, b"ATG"), (56, b"TAA")]);
+        let rd2 = build_candidates(&region(&chains), &chains, &g2, &p, &[]);
+        assert_eq!(rd2.exons[0].exon_type, ExonType::Initial);
     }
 
     #[test]

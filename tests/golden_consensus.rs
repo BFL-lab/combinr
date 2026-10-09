@@ -41,6 +41,8 @@ fn default_config() -> ConsensusConfig {
         search_long_introns: 0,
         extend_terminal_stop: false,
         peak_augment: false,
+        require_atg_start: false,
+        intron_score_scale: combinr::consensus::IntronScoreScale::Linear,
         promote_transcript_orfs: false,
         alt_splice: false,
         min_coding_length: 150,
