@@ -6,7 +6,8 @@
 //! evidence-derived model:
 //! - gene predictions (ABINITIO/OTHER): each CDS segment is a typed exon
 //!   (initial/internal/terminal/single by position), its frame computed from the
-//!   cumulative coding length (`cds_length % 3 + 1`), not the GFF phase column;
+//!   cumulative coding length (`cds_length % 3 + 1`) seeded by the GFF phase column
+//!   of the chain's 5'-most CDS row (a nonzero phase marks a 5'-partial prediction);
 //! - proteins: paint the coding vector for every segment, and seed internal exons for
 //!   internal segments with all stop-free reading frames;
 //! - transcripts: seed internal exons (no coding-vector painting — their contribution
@@ -151,7 +152,15 @@ impl Builder<'_> {
                 .1
                 .push(chain.span);
         }
-        let mut cum_len = 0i64;
+        // GFF3 phase of the 5'-most CDS row = bases skipped to the first complete codon.
+        // Seed the cumulative length so the inherited frames match the predictor's own
+        // reading frame: phase 0 -> frame 1 (cum_len 0), phase 1 -> frame 3 (cum_len 2),
+        // phase 2 -> frame 2 (cum_len 1).
+        let mut cum_len: i64 = match chain.cds_start_phase {
+            1 => 2,
+            2 => 1,
+            _ => 0,
+        };
         for (i, seg) in chain.links.iter().enumerate() {
             let exon_type = position_type(i, n);
             let start_frame = (cum_len.rem_euclid(3) + 1) as u8;
@@ -262,7 +271,10 @@ impl Builder<'_> {
     }
 
     /// Validate a single computed frame against in-frame stops, then add the exon.
-    /// Terminal/single exons trim their trailing stop codon before the check.
+    /// Terminal/single exons trim their trailing stop codon before the check — but only
+    /// when the last 3 bp really are a stop under the configured genetic code (CDS rows
+    /// of many pipelines exclude the stop codon, e.g. when it lives in a separate
+    /// `stop_codon` feature).
     fn try_add_exon(
         &mut self,
         seg: Coordset,
@@ -271,7 +283,14 @@ impl Builder<'_> {
         chain: &EvidenceChain,
     ) {
         let check_rend = match exon_type {
-            ExonType::Terminal | ExonType::Single => seg.rend - 3,
+            ExonType::Terminal | ExonType::Single => {
+                match self.genome.subseq(&self.contig, seg.rend - 2, seg.rend) {
+                    Some(codon) if codon.len() == 3 && self.code.is_stop(codon) => seg.rend - 3,
+                    // sequence unavailable: keep the historical trim
+                    None => seg.rend - 3,
+                    _ => seg.rend,
+                }
+            }
             _ => seg.rend,
         };
         if check_rend >= seg.lend {
@@ -282,7 +301,7 @@ impl Builder<'_> {
                     .unwrap_or_default();
                 determine_good_phases(seq, self.code)
             };
-            if !good.is_empty() && !good.contains(&start_frame) {
+            if !good.contains(&start_frame) {
                 return; // computed frame has an in-frame stop -> skip this exon
             }
         }
@@ -348,6 +367,10 @@ impl Builder<'_> {
     }
 
     /// Every gap between consecutive links becomes an evidence-supported intron.
+    /// EVM registers an intron even when repeat-masking zeroes its score
+    /// (`$INTRONS_TO_SCORE{$key} += 0`), so the trellis can still bridge introns that
+    /// are fully covered by repeats (TE-intron genes stay connected); masked bases
+    /// simply contribute no score. Do the same.
     fn add_introns(&mut self, chain: &EvidenceChain) {
         for w in chain.links.windows(2) {
             let intron = w[0].gap_to(&w[1]);
@@ -355,9 +378,6 @@ impl Builder<'_> {
                 continue;
             }
             let unmasked = self.vectors.unmasked_len(intron.lend, intron.rend);
-            if unmasked <= 0 {
-                continue;
-            }
             let key = (intron.lend, intron.rend);
             self.introns.add(key, chain.weight, unmasked);
             self.introns
@@ -411,6 +431,7 @@ mod tests {
             orient: Strand::Plus,
             span,
             links,
+            cds_start_phase: 0,
         }
     }
 
@@ -559,6 +580,69 @@ mod tests {
         // identical exon structure -> 2 unique exons (initial + terminal), each with 2 evidences
         assert_eq!(rd.exons.len(), 2);
         assert!(rd.exons.iter().all(|e| e.evidence.len() == 2));
+    }
+
+    #[test]
+    fn prediction_frames_honor_the_gff_phase_column() {
+        // same two-exon prediction as `prediction_yields_typed_framed_exons_and_intron_coverage`,
+        // but the chain carries a 5' phase of 1 (a 5'-partial input prediction)
+        let g = genome(70, &[(56, b"TAA")]);
+        let mut c = chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)]);
+        c.cds_start_phase = 1;
+        let chains = vec![c];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert_eq!(rd.exons[0].start_frame, 3, "phase 1 -> skip 1 base -> frame 3");
+        // cum_len = 2 (seed) + 9 = 11 -> 11 % 3 + 1 = 3
+        assert_eq!(rd.exons[1].start_frame, 3);
+    }
+
+    #[test]
+    fn prediction_exon_with_stops_in_all_frames_is_skipped() {
+        // single-exon prediction 10..21 with stops in every frame: TAA at 10..12 (phase 1),
+        // TGA at 14..16 (phase 3), TAG at 18..20 (phase 2). The trailing codon 19..21 is
+        // not a stop, so no 3-bp terminal trim applies. Previously an empty `good` list
+        // slipped past the guard and the exon was inserted anyway.
+        let g = genome(40, &[(10, b"TAA"), (14, b"TGA"), (18, b"TAG")]);
+        let chains = vec![chain(EvClass::AbinitioPrediction, 1.0, &[(10, 21)])];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert!(rd.exons.is_empty());
+    }
+
+    #[test]
+    fn terminal_exon_without_trailing_stop_is_not_trimmed() {
+        // CDS rows exclude the stop codon (it lives in a separate stop_codon feature):
+        // terminal exon 50..55 is all coding, no trailing stop in the genome segment.
+        let g = genome(70, &[]);
+        let chains = vec![chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            &[(10, 18), (50, 55)],
+        )];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert_eq!(rd.exons.len(), 2);
+        let term = &rd.exons[1];
+        assert_eq!(term.exon_type, ExonType::Terminal);
+        // end_frame computed from the full 6 bp, not a blind trim: end_frame_for(1, 6) = 3
+        assert_eq!(term.end_frame, 3);
+    }
+
+    #[test]
+    fn fully_masked_intron_is_still_registered() {
+        // EVM parity: masking zeroes an intron's score but must not sever the trellis
+        // connection (TE-filled introns are common in repeat-rich genomes)
+        let g = genome(70, &[(56, b"TAA")]);
+        let chains = vec![chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)])];
+        let mask = [Coordset::new(19, 49)];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &mask);
+        assert!(
+            rd.introns.contains((19, 49)),
+            "fully masked intron must still be registered"
+        );
+        assert_eq!(rd.introns.score((19, 49)), Some(0.0), "but scores zero");
+        assert_eq!(
+            rd.introns.evidence((19, 49)),
+            &[("acc".to_string(), "src".to_string())]
+        );
     }
 
     #[test]

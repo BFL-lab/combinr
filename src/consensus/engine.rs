@@ -220,6 +220,7 @@ fn build_rc_region(
             orient: Strand::Plus,
             span,
             links,
+            cds_start_phase: c.cds_start_phase,
         });
     }
 
@@ -322,11 +323,16 @@ fn resolve(
             (cds, five_utr, three_utr, proj.hit_stop, phase)
         }
         None => {
+            // sequence unavailable (e.g. evidence past the contig end): emit the raw
+            // path exons but never claim completeness — no stop scan was possible.
             let phase = if has_start { 0 } else { p as u8 };
-            (exons.clone(), Vec::new(), Vec::new(), has_stop, phase)
+            (exons.clone(), Vec::new(), Vec::new(), false, phase)
         }
     };
 
+    // a non-empty 3'UTR means the ORF projection hit a premature stop mid-path and
+    // the CDS was truncated before the terminal exon: not a complete 3' end.
+    let partial3 = !has_stop || !hit_stop || !three_utr.is_empty();
     CalledGene {
         contig: contig.into(),
         orient,
@@ -335,7 +341,7 @@ fn resolve(
         five_utr,
         three_utr,
         partial5: !has_start,
-        partial3: !has_stop || !hit_stop,
+        partial3,
         cds_start_phase,
         score: g.score,
         support,
@@ -539,6 +545,7 @@ mod tests {
             orient,
             span,
             links,
+            cds_start_phase: 0,
         }
     }
 
@@ -860,7 +867,11 @@ mod tests {
         );
         assert_eq!(gene.cds_start_phase, 2);
         assert!(gene.partial5, "path starts at an internal exon");
-        assert!(!gene.partial3, "terminal exon + in-frame stop");
+        assert!(
+            gene.partial3,
+            "the ORF stops mid-path: the terminal exon is untranslated 3'UTR"
+        );
+        assert!(!gene.three_utr.is_empty());
     }
 
     #[test]
@@ -881,7 +892,10 @@ mod tests {
         assert!(gene.five_utr.is_empty());
         assert_eq!(gene.cds_start_phase, 1);
         assert!(gene.partial5);
-        assert!(!gene.partial3);
+        assert!(
+            gene.partial3,
+            "the ORF stops mid-path: the terminal exon is untranslated 3'UTR"
+        );
     }
 
     #[test]
@@ -909,6 +923,9 @@ mod tests {
         assert!(gene.five_utr.is_empty());
         assert_eq!(gene.cds_start_phase, 2);
         assert!(gene.partial5);
-        assert!(!gene.partial3);
+        assert!(
+            gene.partial3,
+            "the ORF stops mid-path: the terminal exon is untranslated 3'UTR"
+        );
     }
 }

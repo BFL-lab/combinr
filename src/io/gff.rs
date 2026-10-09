@@ -31,6 +31,8 @@ pub(crate) struct GffRecord<'a> {
     /// Column 6 score → percent identity (`.` becomes 100, the PASA assumption).
     pub score: Option<f64>,
     pub strand: Strand,
+    /// Column 8 phase (`.` or unparseable becomes 0).
+    pub phase: u8,
     /// Column 9, the raw attribute string (parse with [`parse_attrs`]).
     pub attrs: &'a str,
 }
@@ -63,6 +65,10 @@ pub(crate) fn record<'a>(
     };
     let lend: i64 = cols[3].parse().map_err(|_| bad("bad start coordinate"))?;
     let rend: i64 = cols[4].parse().map_err(|_| bad("bad end coordinate"))?;
+    let phase: u8 = match cols[7] {
+        "0" | "1" | "2" => cols[7].parse().unwrap_or(0),
+        _ => 0,
+    };
     Ok(Some(GffRecord {
         contig: cols[0],
         source: cols[1],
@@ -71,6 +77,7 @@ pub(crate) fn record<'a>(
         rend,
         score: parse_score(cols[5]),
         strand: Strand::from_char(cols[6].chars().next().unwrap_or('.')),
+        phase,
         attrs: cols[8],
     }))
 }
