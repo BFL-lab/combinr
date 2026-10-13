@@ -42,6 +42,16 @@ coding structure).
   (the union of intron boundaries and CDS bounds seen across the inputs), and
   in-frame stops are detected with the configurable genetic code, never a hard-coded
   table.
+- **Opt-in end repairs (`consensus`).** EVM's candidate-stage 5'/start extension is
+  not ported, since it gates candidate exons on a genome ATG scan. Instead, two
+  off-by-default repairs run after the trellis has chosen the genes, so they never add
+  candidate exons or change which genes are called: `--extend-orf-stop` extends a gene
+  whose ORF runs off its last exon to the first in-frame stop, and
+  `--require-atg-start` moves a non-ATG start to an in-frame ATG (extending the first
+  exon upstream to one when needed) or else flags the gene `partial5`. Each scans the
+  genome only from a terminus the gene claims (a terminal or single last exon, an
+  initial or single first exon); a gene that ends or begins at an internal exon is left
+  partial. Without these flags the output is unchanged.
 - **The genome FASTA is only needed for the ORF/UTR step.** Assembly and
   alt-splice classification are purely coordinate-based.
 - **ORFs come from an external gene prediction, not from translating the
@@ -175,6 +185,15 @@ off-by-default EVM heuristics `--research-intergenic <bp>` (re-search intergenic
 for missed genes), `--search-long-introns <bp>` (find nested genes in long introns),
 `--extend-terminal-stop` (extend protein/transcript 3' ends to a stop to complete genes),
 `--peak-augment` (boost intergenic scores near start/stop evidence peaks),
+`--intron-score-cap <bp|auto>` (cap the unmasked length counted toward any one
+intron's score, default 0 = uncapped, or `auto` to scale it logarithmically past 1 kb,
+a guard against a giant spurious intron fusing neighbouring genes; capping lowers gene
+scores, so more genes may be flagged low-support), the post-trellis end repairs
+`--extend-orf-stop` (extend a called gene whose ORF runs off its terminal or single
+exon to the first in-frame stop, up to 10 kb downstream) and `--require-atg-start`
+(move a non-ATG start to the first in-frame ATG within 120 codons, the skipped bases
+becoming 5'UTR, else extend the first exon up to 5 kb upstream to an ATG after the
+nearest in-frame stop, else flag the gene `partial5`; see Design notes),
 `--promote-transcript-orfs` (at loci with only transcript evidence and no consensus CDS,
 find the longest ORF in the transcripts and emit it, tagged `support=transcript_orf`),
 `--alt-splice` (also emit each consensus locus's alternative transcript isoforms as extra

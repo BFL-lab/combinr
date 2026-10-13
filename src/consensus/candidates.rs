@@ -274,8 +274,10 @@ impl Builder<'_> {
     /// Terminal-stop extension (EVM `extend_exon_downstream_to_stop`, non-canonical):
     /// extend a 3' alignment segment downstream, in each stop-free frame, to the first
     /// in-frame genetic-code stop, forming a terminal exon. Lets protein/transcript-only
-    /// loci acquire a 3' terminus (anti-false-negative); the 5'/start half is omitted
-    /// because it would require canonical ATG scanning (see `avoid-canonical-splice-bias`).
+    /// loci acquire a 3' terminus (anti-false-negative). EVM's 5'/start half is not ported
+    /// at the candidate stage, where it would gate candidates on a genome ATG scan; the
+    /// opt-in `--require-atg-start` repairs a called gene's start after the trellis
+    /// instead (`engine::resolve`).
     fn try_extend_terminal(&mut self, seg: Coordset, chain: &EvidenceChain) {
         let phases = {
             let s = self
