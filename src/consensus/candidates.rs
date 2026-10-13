@@ -291,7 +291,7 @@ impl Builder<'_> {
                     .unwrap_or_default();
                 determine_good_phases(seq, self.code)
             };
-            if !good.is_empty() && !good.contains(&start_frame) {
+            if !good.contains(&start_frame) {
                 return; // computed frame has an in-frame stop -> skip this exon
             }
         }
@@ -583,6 +583,23 @@ mod tests {
         assert_eq!(rd.exons[0].start_frame, 3, "phase 1 -> skip 1 base -> frame 3");
         // cum_len = 2 (seed) + 9 = 11 -> 11 % 3 + 1 = 3
         assert_eq!(rd.exons[1].start_frame, 3);
+    }
+
+    #[test]
+    fn prediction_exon_with_stops_in_all_frames_is_skipped() {
+        // three-exon prediction whose internal exon 50..61 has a stop in every frame:
+        // TAA at 50..52 (phase 1), TGA at 54..56 (phase 3), TAG at 58..60 (phase 2).
+        // Internal exons are checked untrimmed, so no frame survives; an empty `good`
+        // list used to slip past the guard and the exon was inserted anyway.
+        let g = genome(200, &[(50, b"TAA"), (54, b"TGA"), (58, b"TAG")]);
+        let chains = vec![chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            &[(10, 18), (50, 61), (100, 108)],
+        )];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert!(!rd.exons.iter().any(|e| e.coords == Coordset::new(50, 61)));
+        assert_eq!(rd.exons.len(), 2, "initial and terminal exons stay");
     }
 
     #[test]
