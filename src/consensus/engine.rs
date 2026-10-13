@@ -327,8 +327,10 @@ fn resolve(
             (cds, five_utr, three_utr, proj.hit_stop, phase)
         }
         None => {
+            // sequence unavailable (e.g. evidence past the contig end): emit the raw
+            // path exons but never claim completeness — no stop scan was possible.
             let phase = if has_start { 0 } else { p as u8 };
-            (exons.clone(), Vec::new(), Vec::new(), has_stop, phase)
+            (exons.clone(), Vec::new(), Vec::new(), false, phase)
         }
     };
 
@@ -970,5 +972,25 @@ mod tests {
         assert_eq!(gene.cds_start_phase, 2);
         assert!(gene.partial5);
         assert!(!gene.partial3);
+    }
+
+    #[test]
+    fn missing_sequence_never_claims_a_stop() {
+        // a single-exon prediction on a contig the FASTA does not hold: no stop scan is
+        // possible, so the gene keeps its raw exons but is never marked 3'-complete
+        let g = genome_with(200, &[]);
+        let mut c = chain(EvClass::AbinitioPrediction, 1.0, Strand::Plus, &[(50, 120)]);
+        c.contig = "chrX".into();
+        let region = ConsensusRegion {
+            contig: "chrX".into(),
+            span: Coordset::new(1, 200),
+            chain_indices: vec![0],
+        };
+        let (cand, filt, w, eng) = config();
+        let genes = consensus_region(&region, &[c], &g, &cand, &filt, &w, &eng, &[]);
+        assert_eq!(genes.len(), 1);
+        assert_eq!(genes[0].cds, vec![Coordset::new(50, 120)]);
+        assert!(!genes[0].partial5);
+        assert!(genes[0].partial3, "no sequence, no stop scan: 3'-partial");
     }
 }
