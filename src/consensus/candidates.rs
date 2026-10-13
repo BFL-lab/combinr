@@ -357,6 +357,10 @@ impl Builder<'_> {
     }
 
     /// Every gap between consecutive links becomes an evidence-supported intron.
+    /// EVM registers an intron even when repeat-masking zeroes its score
+    /// (`$INTRONS_TO_SCORE{$key} += 0`), so the trellis can still bridge introns that
+    /// are fully covered by repeats (TE-intron genes stay connected); masked bases
+    /// simply contribute no score. Do the same.
     fn add_introns(&mut self, chain: &EvidenceChain) {
         for w in chain.links.windows(2) {
             let intron = w[0].gap_to(&w[1]);
@@ -364,9 +368,6 @@ impl Builder<'_> {
                 continue;
             }
             let unmasked = self.vectors.unmasked_len(intron.lend, intron.rend);
-            if unmasked <= 0 {
-                continue;
-            }
             let key = (intron.lend, intron.rend);
             self.introns.add(key, chain.weight, unmasked);
             self.introns
@@ -600,6 +601,25 @@ mod tests {
         let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
         assert!(!rd.exons.iter().any(|e| e.coords == Coordset::new(50, 61)));
         assert_eq!(rd.exons.len(), 2, "initial and terminal exons stay");
+    }
+
+    #[test]
+    fn fully_masked_intron_is_still_registered() {
+        // EVM parity: masking zeroes an intron's score but must not sever the trellis
+        // connection (TE-filled introns are common in repeat-rich genomes)
+        let g = genome(70, &[(56, b"TAA")]);
+        let chains = vec![chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)])];
+        let mask = [Coordset::new(19, 49)];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &mask);
+        assert!(
+            rd.introns.contains((19, 49)),
+            "fully masked intron must still be registered"
+        );
+        assert_eq!(rd.introns.score((19, 49)), Some(0.0), "but scores zero");
+        assert_eq!(
+            rd.introns.evidence((19, 49)),
+            &[("acc".to_string(), "src".to_string())]
+        );
     }
 
     #[test]
