@@ -643,7 +643,10 @@ mod tests {
         c.cds_start_phase = 1;
         let chains = vec![c];
         let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
-        assert_eq!(rd.exons[0].start_frame, 3, "phase 1 -> skip 1 base -> frame 3");
+        assert_eq!(
+            rd.exons[0].start_frame, 3,
+            "phase 1 -> skip 1 base -> frame 3"
+        );
         // cum_len = 2 (seed) + 9 = 11 -> 11 % 3 + 1 = 3
         assert_eq!(rd.exons[1].start_frame, 3);
     }
@@ -702,7 +705,11 @@ mod tests {
         // EVM parity: masking zeroes an intron's score but must not sever the trellis
         // connection (TE-filled introns are common in repeat-rich genomes)
         let g = genome(70, &[(56, b"TAA")]);
-        let chains = vec![chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)])];
+        let chains = vec![chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            &[(10, 18), (50, 58)],
+        )];
         let mask = [Coordset::new(19, 49)];
         let rd = build_candidates(&region(&chains), &chains, &g, &params(), &mask);
         assert!(

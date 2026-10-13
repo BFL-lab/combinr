@@ -200,7 +200,9 @@ fn parse_chains(text: &str, file: &str, kind: EvidenceKind) -> Result<Vec<RawCha
                 segs: Vec::new(),
             }
         });
-        entry.segs.push((Coordset::new(rec.lend, rec.rend), rec.phase));
+        entry
+            .segs
+            .push((Coordset::new(rec.lend, rec.rend), rec.phase));
     }
 
     let mut out = Vec::with_capacity(order.len());
@@ -285,7 +287,10 @@ chr1\tunknownsrc\tCDS\t500\t600\t.\t+\t0\tParent=m2";
 chr1\tfgenesh\tCDS\t100\t200\t.\t+\t0\tParent=m1
 chr1\tfgenesh\tCDS\t300\t400\t.\t+\t2\tParent=m1";
         let (chains, _) = ingest_text(plus, "p", EvidenceKind::Prediction, &weights()).unwrap();
-        assert_eq!(chains[0].cds_start_phase, 0, "plus: first row by coordinate");
+        assert_eq!(
+            chains[0].cds_start_phase, 0,
+            "plus: first row by coordinate"
+        );
 
         let minus = "\
 chr1\tfgenesh\tCDS\t100\t200\t.\t-\t0\tParent=m1

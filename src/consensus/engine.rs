@@ -11,7 +11,9 @@
 //! re-search the left/right tails beyond the *retained* genes' span (≥ `research_size`),
 //! which is also the fix for EVM's bug where an eliminated gene's span blocked re-search.
 
-use crate::consensus::candidates::{CandidateParams, MAX_TERMINAL_EXTEND, RegionData, build_candidates};
+use crate::consensus::candidates::{
+    CandidateParams, MAX_TERMINAL_EXTEND, RegionData, build_candidates,
+};
 use crate::consensus::evidence::EvidenceChain;
 use crate::consensus::exon::{ExonType, frame_offset};
 use crate::consensus::filter::{FilterParams, SupportFlags, assess};
@@ -547,14 +549,12 @@ fn resolve(
             };
             // ... but a 5'-partial CDS starts at the transcript's first base, the leading
             // partial codon carried as the first CDS row's phase (GFF3), not as a 5'UTR
-            let (cds_t_start, phase) = if !has_start
-                && proj.cds_t_end > proj.cds_t_start
-                && !(require_atg && atg_ok)
-            {
-                (0, p as u8)
-            } else {
-                (proj.cds_t_start, 0)
-            };
+            let (cds_t_start, phase) =
+                if !has_start && proj.cds_t_end > proj.cds_t_start && !(require_atg && atg_ok) {
+                    (0, p as u8)
+                } else {
+                    (proj.cds_t_start, 0)
+                };
             let (cds, five_utr, mut three_utr) = st.cds_and_utrs(cds_t_start, proj.cds_t_end);
             if extended3 {
                 // the stop lies in the cap-extended 3'-most exon (the unextended path held
