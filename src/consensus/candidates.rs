@@ -6,7 +6,8 @@
 //! evidence-derived model:
 //! - gene predictions (ABINITIO/OTHER): each CDS segment is a typed exon
 //!   (initial/internal/terminal/single by position), its frame computed from the
-//!   cumulative coding length (`cds_length % 3 + 1`), not the GFF phase column;
+//!   cumulative coding length (`cds_length % 3 + 1`) seeded by the GFF phase column
+//!   of the chain's 5'-most CDS row (a nonzero phase marks a 5'-partial prediction);
 //! - proteins: paint the coding vector for every segment, and seed internal exons for
 //!   internal segments with all stop-free reading frames;
 //! - transcripts: seed internal exons (no coding-vector painting — their contribution
@@ -33,7 +34,58 @@ use crate::orf::GeneticCode;
 use std::collections::HashMap;
 
 /// Max bp to extend a terminal alignment segment downstream looking for a stop codon.
-const MAX_TERMINAL_EXTEND: i64 = 10_000;
+pub(crate) const MAX_TERMINAL_EXTEND: i64 = 10_000;
+
+/// How the unmasked length of one intron maps to its score contribution
+/// (`--intron-score-cap`), per intron per supporting chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntronScoreScale {
+    /// `weight x len` (EVM behaviour; the default).
+    Linear,
+    /// `weight x min(len, cap)`.
+    Cap(i64),
+    /// `weight x len` up to 1 kb, then logarithmic
+    /// (`weight x 1 kb x (1 + ln(len / 1 kb))`): giant introns keep scoring more but
+    /// can no longer outscore gene-splitting signals by orders of magnitude.
+    Smooth,
+}
+
+/// Knee (bp) for [`IntronScoreScale::Smooth`]: introns up to this length score linearly.
+pub(crate) const INTRON_SMOOTH_KNEE: i64 = 1_000;
+
+impl IntronScoreScale {
+    /// The length contributing to an intron's score under this scaling.
+    pub fn scored_len(self, len: i64) -> i64 {
+        match self {
+            Self::Linear => len,
+            Self::Cap(cap) => len.min(cap),
+            Self::Smooth => {
+                if len <= INTRON_SMOOTH_KNEE {
+                    len
+                } else {
+                    let k = INTRON_SMOOTH_KNEE as f64;
+                    (k * (1.0 + (len as f64 / k).ln())).round() as i64
+                }
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for IntronScoreScale {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "0" | "off" => Ok(Self::Linear),
+            "auto" => Ok(Self::Smooth),
+            _ => match s.parse::<i64>() {
+                Ok(n) if n > 0 => Ok(Self::Cap(n)),
+                _ => Err(format!(
+                    "invalid --intron-score-cap {s:?} (expected 0, auto, or a bp cap)"
+                )),
+            },
+        }
+    }
+}
 
 /// Tunables for candidate generation.
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +98,11 @@ pub struct CandidateParams {
     /// Boost intergenic scores near start/stop evidence-density peaks
     /// (EVM `augment_intergenic_from_start_stop_peaks`).
     pub peak_augment: bool,
+    /// Cap on the unmasked length contributing to an intron's score. Anti-fusion knob
+    /// for repeat-rich genomes: without it, a giant intron from a misassembled
+    /// transcript outweighs any intergenic signal and the trellis absorbs the
+    /// neighbouring gene. `Cap(n)` hard-caps, `Smooth` scales logarithmically.
+    pub intron_score_scale: IntronScoreScale,
     /// Sum of all gene-prediction weights (EVM `SUM_GENEPRED_WEIGHTS`), the peak threshold
     /// and the augmented intergenic level.
     pub sum_genepred_weights: f64,
@@ -78,6 +135,7 @@ pub fn build_candidates(
         code: &params.code,
         min_intron_length: params.min_intron_length,
         extend_terminal_stop: params.extend_terminal_stop,
+        intron_score_scale: params.intron_score_scale,
         sum_genepred_weights: params.sum_genepred_weights,
         vectors: RegionVectors::new(span.lend, len),
         introns: IntronScores::default(),
@@ -125,6 +183,7 @@ struct Builder<'a> {
     code: &'a GeneticCode,
     min_intron_length: i64,
     extend_terminal_stop: bool,
+    intron_score_scale: IntronScoreScale,
     sum_genepred_weights: f64,
     vectors: RegionVectors,
     introns: IntronScores,
@@ -151,7 +210,15 @@ impl Builder<'_> {
                 .1
                 .push(chain.span);
         }
-        let mut cum_len = 0i64;
+        // GFF3 phase of the 5'-most CDS row = bases skipped to the first complete codon.
+        // Seed the cumulative length so the inherited frames match the predictor's own
+        // reading frame: phase 0 -> frame 1 (cum_len 0), phase 1 -> frame 3 (cum_len 2),
+        // phase 2 -> frame 2 (cum_len 1).
+        let mut cum_len: i64 = match chain.cds_start_phase {
+            1 => 2,
+            2 => 1,
+            _ => 0,
+        };
         for (i, seg) in chain.links.iter().enumerate() {
             let exon_type = position_type(i, n);
             let start_frame = (cum_len.rem_euclid(3) + 1) as u8;
@@ -207,8 +274,10 @@ impl Builder<'_> {
     /// Terminal-stop extension (EVM `extend_exon_downstream_to_stop`, non-canonical):
     /// extend a 3' alignment segment downstream, in each stop-free frame, to the first
     /// in-frame genetic-code stop, forming a terminal exon. Lets protein/transcript-only
-    /// loci acquire a 3' terminus (anti-false-negative); the 5'/start half is omitted
-    /// because it would require canonical ATG scanning (see `avoid-canonical-splice-bias`).
+    /// loci acquire a 3' terminus (anti-false-negative). EVM's 5'/start half is not ported
+    /// at the candidate stage, where it would gate candidates on a genome ATG scan; the
+    /// opt-in `--require-atg-start` repairs a called gene's start after the trellis
+    /// instead (`engine::resolve`).
     fn try_extend_terminal(&mut self, seg: Coordset, chain: &EvidenceChain) {
         let phases = {
             let s = self
@@ -282,7 +351,7 @@ impl Builder<'_> {
                     .unwrap_or_default();
                 determine_good_phases(seq, self.code)
             };
-            if !good.is_empty() && !good.contains(&start_frame) {
+            if !good.contains(&start_frame) {
                 return; // computed frame has an in-frame stop -> skip this exon
             }
         }
@@ -348,6 +417,10 @@ impl Builder<'_> {
     }
 
     /// Every gap between consecutive links becomes an evidence-supported intron.
+    /// EVM registers an intron even when repeat-masking zeroes its score
+    /// (`$INTRONS_TO_SCORE{$key} += 0`), so the trellis can still bridge introns that
+    /// are fully covered by repeats (TE-intron genes stay connected); masked bases
+    /// simply contribute no score. Do the same.
     fn add_introns(&mut self, chain: &EvidenceChain) {
         for w in chain.links.windows(2) {
             let intron = w[0].gap_to(&w[1]);
@@ -355,11 +428,9 @@ impl Builder<'_> {
                 continue;
             }
             let unmasked = self.vectors.unmasked_len(intron.lend, intron.rend);
-            if unmasked <= 0 {
-                continue;
-            }
+            let scored = self.intron_score_scale.scored_len(unmasked);
             let key = (intron.lend, intron.rend);
-            self.introns.add(key, chain.weight, unmasked);
+            self.introns.add(key, chain.weight, scored);
             self.introns
                 .attribute(key, &chain.accession, &chain.ev_type);
         }
@@ -411,6 +482,7 @@ mod tests {
             orient: Strand::Plus,
             span,
             links,
+            cds_start_phase: 0,
         }
     }
 
@@ -428,6 +500,7 @@ mod tests {
             code: GeneticCode::default(),
             extend_terminal_stop: false,
             peak_augment: false,
+            intron_score_scale: IntronScoreScale::Linear,
             sum_genepred_weights: 0.0,
         }
     }
@@ -559,6 +632,95 @@ mod tests {
         // identical exon structure -> 2 unique exons (initial + terminal), each with 2 evidences
         assert_eq!(rd.exons.len(), 2);
         assert!(rd.exons.iter().all(|e| e.evidence.len() == 2));
+    }
+
+    #[test]
+    fn prediction_frames_honor_the_gff_phase_column() {
+        // same two-exon prediction as `prediction_yields_typed_framed_exons_and_intron_coverage`,
+        // but the chain carries a 5' phase of 1 (a 5'-partial input prediction)
+        let g = genome(70, &[(56, b"TAA")]);
+        let mut c = chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)]);
+        c.cds_start_phase = 1;
+        let chains = vec![c];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert_eq!(
+            rd.exons[0].start_frame, 3,
+            "phase 1 -> skip 1 base -> frame 3"
+        );
+        // cum_len = 2 (seed) + 9 = 11 -> 11 % 3 + 1 = 3
+        assert_eq!(rd.exons[1].start_frame, 3);
+    }
+
+    #[test]
+    fn prediction_exon_with_stops_in_all_frames_is_skipped() {
+        // three-exon prediction whose internal exon 50..61 has a stop in every frame:
+        // TAA at 50..52 (phase 1), TGA at 54..56 (phase 3), TAG at 58..60 (phase 2).
+        // Internal exons are checked untrimmed, so no frame survives; an empty `good`
+        // list used to slip past the guard and the exon was inserted anyway.
+        let g = genome(200, &[(50, b"TAA"), (54, b"TGA"), (58, b"TAG")]);
+        let chains = vec![chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            &[(10, 18), (50, 61), (100, 108)],
+        )];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert!(!rd.exons.iter().any(|e| e.coords == Coordset::new(50, 61)));
+        assert_eq!(rd.exons.len(), 2, "initial and terminal exons stay");
+    }
+
+    #[test]
+    fn intron_score_scale_parses_and_scales() {
+        use std::str::FromStr;
+        assert_eq!(
+            IntronScoreScale::from_str("0"),
+            Ok(IntronScoreScale::Linear)
+        );
+        assert_eq!(
+            IntronScoreScale::from_str("auto"),
+            Ok(IntronScoreScale::Smooth)
+        );
+        assert_eq!(
+            IntronScoreScale::from_str("2000"),
+            Ok(IntronScoreScale::Cap(2000))
+        );
+        assert!(IntronScoreScale::from_str("-5").is_err());
+        assert!(IntronScoreScale::from_str("banana").is_err());
+
+        // linear and cap
+        assert_eq!(IntronScoreScale::Linear.scored_len(15_000), 15_000);
+        assert_eq!(IntronScoreScale::Cap(2000).scored_len(15_000), 2000);
+        // smooth: linear up to the 1 kb knee, logarithmic beyond
+        assert_eq!(IntronScoreScale::Smooth.scored_len(500), 500);
+        assert_eq!(IntronScoreScale::Smooth.scored_len(1_000), 1_000);
+        let s15k = IntronScoreScale::Smooth.scored_len(15_000);
+        assert!((3000..4500).contains(&s15k), "15 kb -> {s15k}"); // ~3708
+        let s50k = IntronScoreScale::Smooth.scored_len(50_000);
+        assert!((4500..5500).contains(&s50k), "50 kb -> {s50k}"); // ~4912
+        // monotone: longer introns still score more, but barely
+        assert!(s50k > s15k && s50k < 2 * s15k);
+    }
+
+    #[test]
+    fn fully_masked_intron_is_still_registered() {
+        // EVM parity: masking zeroes an intron's score but must not sever the trellis
+        // connection (TE-filled introns are common in repeat-rich genomes)
+        let g = genome(70, &[(56, b"TAA")]);
+        let chains = vec![chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            &[(10, 18), (50, 58)],
+        )];
+        let mask = [Coordset::new(19, 49)];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &mask);
+        assert!(
+            rd.introns.contains((19, 49)),
+            "fully masked intron must still be registered"
+        );
+        assert_eq!(rd.introns.score((19, 49)), Some(0.0), "but scores zero");
+        assert_eq!(
+            rd.introns.evidence((19, 49)),
+            &[("acc".to_string(), "src".to_string())]
+        );
     }
 
     #[test]

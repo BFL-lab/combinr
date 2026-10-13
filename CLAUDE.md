@@ -77,8 +77,14 @@ intervals overlapping it via `repeats::overlapping`). `report` writes the opt-in
   locus can yield genes on both strands (anti-false-negative).
 - **Flag-not-drop** low-support filtering by default (`--strict` for EVM's drop). Also
   fixes EVM's bug where an eliminated gene's span blocked re-search.
-- **End-stitching and 5'/start terminal extension are intentionally NOT ported** — they
-  rely on canonical splice/ATG scanning that conflicts with the project principle.
+- **End-stitching and EVM's candidate-stage 5'/start extension are intentionally NOT
+  ported** — they rely on canonical splice/ATG scanning that conflicts with the project
+  principle. The opt-in post-trellis repairs `--extend-orf-stop` (a run-off ORF
+  extended to the first in-frame stop) and `--require-atg-start` (a non-ATG start
+  trimmed to an in-frame ATG, else extended upstream to a stop-bounded one, else
+  `partial5`) do scan the genome, but only from a terminus the called gene claims
+  (terminal/single last exon, initial/single first exon), never adding candidates or
+  changing which genes are called; the default path is unchanged.
 - The `orf`→`consensus` fold is done: Phase 1 (`--promote-transcript-orfs`) fills
   transcript-only loci via de-novo ORF; Phase 2 (`--alt-splice`) emits a consensus locus's
   alternative transcript isoforms as extra mRNAs anchored on the consensus CDS (reusing

@@ -226,9 +226,39 @@ pub struct ConsensusTuning {
     /// (lets evidence-only loci gain a 3' end). Off by default.
     #[arg(long)]
     pub extend_terminal_stop: bool,
+    /// Extend a called gene whose ORF runs off the end of its terminal or single exon
+    /// downstream, in frame, to the first stop codon under the genetic code (scanning up
+    /// to 10 kb of genome), so the gene ends at a real stop; applied after the trellis.
+    /// Genes that end at an internal exon stay 3'-partial. An extended gene's
+    /// coding_length is its CDS length; low_support is not re-assessed. Off by default.
+    #[arg(long)]
+    pub extend_orf_stop: bool,
     /// Boost intergenic scores near start/stop evidence-density peaks. Off by default.
     #[arg(long)]
     pub peak_augment: bool,
+    /// Cap on the unmasked length (bp) contributing to any single intron's score, or
+    /// `auto` for smooth logarithmic scaling (linear up to 1 kb, log beyond).
+    /// 0 = uncapped (the default). Anti-fusion knob for repeat-rich genomes: without a
+    /// cap, a giant intron from a misassembled transcript outweighs the intergenic signal
+    /// and the trellis absorbs the neighbouring gene. 1000-5000 works well for plants;
+    /// vertebrates with genuinely long introns should use 10000+ or auto.
+    /// Capping also lowers the gene score and score_ratio, so more genes can be
+    /// flagged low_support.
+    #[arg(long, default_value = "0")]
+    pub intron_score_cap: combinr::consensus::IntronScoreScale,
+    /// Repair called genes whose CDS does not start with ATG; applied after the trellis
+    /// (candidate exons and gene choice are unchanged). For a gene that begins at an
+    /// initial or single exon: an ATG start is kept; otherwise the start moves to the
+    /// first in-frame ATG within 120 codons (the skipped bases become 5'UTR); otherwise
+    /// up to 5 kb of genome upstream is scanned in frame for an ATG after the nearest
+    /// upstream in-frame stop, and the first exon is extended to it (its 5'UTR starts just
+    /// past that stop, or at the far end of the scan when there is none); otherwise the
+    /// gene is flagged partial5. A first exon that begins mid-codon is only extended, never
+    /// trimmed; genes that begin at an internal exon are unchanged. The start codon is ATG
+    /// under every genetic code (the code sets only the stops). A modified gene's
+    /// coding_length is its CDS length; low_support is not re-assessed. Off by default.
+    #[arg(long)]
+    pub require_atg_start: bool,
 }
 
 #[derive(Parser, Debug)]

@@ -34,6 +34,9 @@ pub struct EvidenceChain {
     pub span: Coordset,
     /// Exon/CDS segments, lend-sorted (forward genomic).
     pub links: Vec<Coordset>,
+    /// Column-8 phase of the 5'-most CDS row (translation order) of a prediction chain;
+    /// 0 for alignment chains and for predictions starting with a complete codon.
+    pub cds_start_phase: u8,
 }
 
 /// How a GFF3 file's rows become chains.
@@ -116,8 +119,18 @@ fn ingest_text(
     for rc in parse_chains(text, file, kind)? {
         match weights.lookup(&rc.ev_type) {
             Some((ev_class, weight)) => {
-                let lend = rc.segs.first().unwrap().lend;
-                let rend = rc.segs.last().unwrap().rend;
+                let lend = rc.segs.first().unwrap().0.lend;
+                let rend = rc.segs.last().unwrap().0.rend;
+                // 5'-most CDS row in translation order: first by coordinate on '+',
+                // last on '-'; its column-8 phase gives the leading partial codon.
+                let cds_start_phase = if kind == EvidenceKind::Prediction {
+                    match rc.strand {
+                        Strand::Minus => rc.segs.last().map(|&(_, ph)| ph).unwrap_or(0),
+                        _ => rc.segs.first().map(|&(_, ph)| ph).unwrap_or(0),
+                    }
+                } else {
+                    0
+                };
                 out.push(EvidenceChain {
                     accession: rc.accession,
                     ev_type: rc.ev_type,
@@ -126,7 +139,8 @@ fn ingest_text(
                     contig: rc.contig,
                     orient: rc.strand,
                     span: Coordset::new(lend, rend),
-                    links: rc.segs,
+                    links: rc.segs.into_iter().map(|(c, _)| c).collect(),
+                    cds_start_phase,
                 });
             }
             None => skipped += 1,
@@ -141,7 +155,8 @@ struct RawChain {
     ev_type: String,
     contig: String,
     strand: Strand,
-    segs: Vec<Coordset>,
+    /// (segment, column-8 phase) pairs; phase is only meaningful for CDS rows.
+    segs: Vec<(Coordset, u8)>,
 }
 
 fn parse_chains(text: &str, file: &str, kind: EvidenceKind) -> Result<Vec<RawChain>> {
@@ -185,13 +200,15 @@ fn parse_chains(text: &str, file: &str, kind: EvidenceKind) -> Result<Vec<RawCha
                 segs: Vec::new(),
             }
         });
-        entry.segs.push(Coordset::new(rec.lend, rec.rend));
+        entry
+            .segs
+            .push((Coordset::new(rec.lend, rec.rend), rec.phase));
     }
 
     let mut out = Vec::with_capacity(order.len());
     for key in order {
         let mut rc = groups.remove(&key).expect("group present");
-        rc.segs.sort_by_key(|c| c.lend);
+        rc.segs.sort_by_key(|c| c.0.lend);
         out.push(rc);
     }
     Ok(out)
@@ -222,10 +239,10 @@ chr1\tfgenesh\tCDS\t100\t200\t.\t+\t0\tID=c1;Parent=m1";
         let c = &chains[0];
         assert_eq!(c.ev_type, "fgenesh");
         assert_eq!(c.accession, "m1");
-        // sorted by lend even though rows were out of order
+        // sorted by lend even though rows were out of order; column-8 phases kept
         assert_eq!(
             c.segs,
-            vec![Coordset::new(100, 200), Coordset::new(300, 400)]
+            vec![(Coordset::new(100, 200), 0), (Coordset::new(300, 400), 2)]
         );
     }
 
@@ -247,7 +264,7 @@ chr1\tnap\tnucleotide_to_protein_match\t300\t400\t88\t+\t.\tID=a1;Target=P1 34 6
 chr1\tfgenesh\texon\t90\t210\t.\t+\t.\tParent=m1
 chr1\tfgenesh\tCDS\t100\t200\t.\t+\t0\tParent=m1";
         let chains = parse_chains(gff, "p", EvidenceKind::Prediction).unwrap();
-        assert_eq!(chains[0].segs, vec![Coordset::new(100, 200)]);
+        assert_eq!(chains[0].segs, vec![(Coordset::new(100, 200), 0)]);
     }
 
     #[test]
@@ -262,5 +279,31 @@ chr1\tunknownsrc\tCDS\t500\t600\t.\t+\t0\tParent=m2";
         assert_eq!(chains[0].ev_class, EvClass::AbinitioPrediction);
         assert_eq!(chains[0].weight, 1.0);
         assert_eq!(chains[0].span, Coordset::new(100, 200));
+    }
+
+    #[test]
+    fn prediction_start_phase_comes_from_the_five_prime_cds_row() {
+        let plus = "\
+chr1\tfgenesh\tCDS\t100\t200\t.\t+\t0\tParent=m1
+chr1\tfgenesh\tCDS\t300\t400\t.\t+\t2\tParent=m1";
+        let (chains, _) = ingest_text(plus, "p", EvidenceKind::Prediction, &weights()).unwrap();
+        assert_eq!(
+            chains[0].cds_start_phase, 0,
+            "plus: first row by coordinate"
+        );
+
+        let minus = "\
+chr1\tfgenesh\tCDS\t100\t200\t.\t-\t0\tParent=m1
+chr1\tfgenesh\tCDS\t300\t400\t.\t-\t2\tParent=m1";
+        let (chains, _) = ingest_text(minus, "p", EvidenceKind::Prediction, &weights()).unwrap();
+        assert_eq!(
+            chains[0].cds_start_phase, 2,
+            "minus: the lend-sorted last row is the 5'-most"
+        );
+
+        let aln = "\
+chr1\tnap\tnucleotide_to_protein_match\t100\t200\t90\t+\t.\tID=a1;Target=P1 1 33";
+        let (chains, _) = ingest_text(aln, "p", EvidenceKind::Alignment, &weights()).unwrap();
+        assert_eq!(chains[0].cds_start_phase, 0, "alignments carry no phase");
     }
 }

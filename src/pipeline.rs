@@ -163,7 +163,15 @@ pub struct ConsensusConfig {
     pub research_intergenic: i64,
     pub search_long_introns: i64,
     pub extend_terminal_stop: bool,
+    /// Extend a called gene's run-off ORF from its terminal/single exon to the first
+    /// downstream in-frame stop (`--extend-orf-stop`).
+    pub extend_orf_stop: bool,
     pub peak_augment: bool,
+    /// Repair the non-ATG start of a called gene at resolution (`--require-atg-start`):
+    /// trim to an in-frame ATG, extend upstream to one, or flag `partial5`.
+    pub require_atg_start: bool,
+    /// Per-intron score scaling (`--intron-score-cap`); `Linear` = uncapped.
+    pub intron_score_scale: crate::consensus::IntronScoreScale,
     pub promote_transcript_orfs: bool,
     pub alt_splice: bool,
     pub min_coding_length: i64,
@@ -202,6 +210,7 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
         code,
         extend_terminal_stop: cfg.extend_terminal_stop,
         peak_augment: cfg.peak_augment,
+        intron_score_scale: cfg.intron_score_scale,
         sum_genepred_weights: weights.sum_genepred_weights(),
     };
     let filt = FilterParams {
@@ -216,6 +225,8 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
         research_intergenic: cfg.research_intergenic,
         search_long_introns: cfg.search_long_introns,
         intergenic_adjust: DEFAULT_INTERGENIC_ADJUST,
+        require_atg_start: cfg.require_atg_start,
+        extend_orf_stop: cfg.extend_orf_stop,
     };
 
     let mask = match &cfg.repeats {

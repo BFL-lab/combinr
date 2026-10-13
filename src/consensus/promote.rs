@@ -149,6 +149,8 @@ fn orf_gene(
         three_utr,
         partial5: !orf.has_start,
         partial3: !orf.has_stop,
+        // a transcript ORF's 3'UTR follows its own stop: real UTR, not a cut-short path
+        truncated: false,
         cds_start_phase,
         score: coding_length as f64,
         support: SupportFlags {
@@ -321,6 +323,7 @@ mod tests {
             three_utr: vec![],
             partial5,
             partial3,
+            truncated: false,
             cds_start_phase: 0,
             score: 100.0,
             support: SupportFlags {
