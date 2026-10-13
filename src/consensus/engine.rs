@@ -301,10 +301,14 @@ fn resolve(
     // 5'/3'-most exons in the gene's reading order (path order is 5'→3' in each pass).
     let first = &rd.exons[g.exon_indices[0]];
     let last = &rd.exons[*g.exon_indices.last().unwrap()];
-    let has_start = matches!(first.exon_type, ExonType::Initial | ExonType::Single);
+    // A start codon needs an initial/single exon that begins on a codon (frame 1). One
+    // that begins mid-codon (a prediction whose 5'-most CDS row has a nonzero GFF3
+    // phase) is a 5'-partial start, like a path that begins at an internal exon.
+    let has_start =
+        matches!(first.exon_type, ExonType::Initial | ExonType::Single) && first.start_frame == 1;
     let has_stop = matches!(last.exon_type, ExonType::Terminal | ExonType::Single);
     // first complete codon within the spliced transcript: a 5'-partial path begins with
-    // a partial codon of `p` bases (0 for an initial/single exon, which is always frame 1)
+    // a partial codon of `p` bases (0 when its first exon begins on a codon, frame 1)
     let p = frame_offset(first.start_frame);
 
     let st = SplicedTranscript::new(&exons, orient);
@@ -908,6 +912,60 @@ mod tests {
         // ORF RC-local 13..24 -> forward 177..188 (first complete codon at forward
         // rend - 2 = 188); the CDS starts at the exon's 5' base (forward 190), phase 2
         assert_eq!(gene.cds, vec![Coordset::new(177, 190)]);
+        assert!(gene.five_utr.is_empty());
+        assert_eq!(gene.cds_start_phase, 2);
+        assert!(gene.partial5);
+        assert!(!gene.partial3);
+    }
+
+    #[test]
+    fn mid_codon_initial_exon_is_a_five_prime_partial_start() {
+        // A plus-strand prediction whose 5'-most CDS row has GFF3 phase 1: Initial 10..30
+        // at start frame 3 -> Terminal 60..90. The first complete codon starts 1 base in,
+        // at 11; the in-frame stop is TAA at 88..90 (decoys: reading from 10 would hit TAA
+        // at 13..15, from 12 TAG at 18..20). Being typed initial does not make the partial
+        // codon a start: the CDS starts at the first base with phase 1, no 5'UTR stub.
+        let g = genome_with(200, &[(13, b"TAA"), (18, b"TAG"), (88, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Initial, 3),
+            (60, 90, ExonType::Terminal, 3),
+        ];
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None);
+        assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(60, 90)]);
+        assert!(
+            gene.five_utr.is_empty(),
+            "the partial codon is coding, not UTR"
+        );
+        assert_eq!(gene.cds_start_phase, 1);
+        assert!(gene.partial5, "a mid-codon first base is not a start codon");
+        assert!(!gene.partial3);
+    }
+
+    #[test]
+    fn mid_codon_initial_exon_minus_strand() {
+        // A minus-strand prediction whose 5'-most CDS row has GFF3 phase 2, in the RC-local
+        // pass (hi = 200): Initial 21..41 (start frame 2) -> Terminal 71..90, i.e. forward
+        // 160..180 (5') and 111..130. RC-local codons from 23 reach the stop TAA at 88..90
+        // (forward 111..113); from 21 the ORF would hit TAA at 24..26, from 22 TAG at 28..30.
+        let mut rc = vec![b'C'; 200];
+        rc[23..26].copy_from_slice(b"TAA"); // RC-local 24..26
+        rc[27..30].copy_from_slice(b"TAG"); // RC-local 28..30
+        rc[87..90].copy_from_slice(b"TAA"); // RC-local 88..90
+        let g = write_fasta(&reverse_complement(&rc));
+        let path = [
+            (21, 41, ExonType::Initial, 2),
+            (71, 90, ExonType::Terminal, 2),
+        ];
+        let gene = resolve_partial(&g, 200, &path, Strand::Minus, Some(200));
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(111, 130), Coordset::new(160, 180)]
+        );
+        // the CDS runs from the exon's 5' base (forward 180, phase 2) to the stop
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(111, 130), Coordset::new(160, 180)]
+        );
         assert!(gene.five_utr.is_empty());
         assert_eq!(gene.cds_start_phase, 2);
         assert!(gene.partial5);
