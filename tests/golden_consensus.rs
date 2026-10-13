@@ -42,6 +42,7 @@ fn default_config() -> ConsensusConfig {
         extend_terminal_stop: false,
         extend_orf_stop: false,
         peak_augment: false,
+        require_atg_start: false,
         intron_score_scale: combinr::consensus::IntronScoreScale::Linear,
         promote_transcript_orfs: false,
         alt_splice: false,

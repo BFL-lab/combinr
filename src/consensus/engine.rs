@@ -37,6 +37,10 @@ pub struct EngineParams {
     /// `--search_long_introns`). 0 = off (the EVM default).
     pub search_long_introns: i64,
     pub intergenic_adjust: f64,
+    /// The CDS of a called gene that begins at an initial/single exon must begin with ATG:
+    /// trim in-frame to the first ATG (5' overhang becomes 5'UTR), else extend the first
+    /// exon upstream to one, else flag the gene `partial5` (`--require-atg-start`).
+    pub require_atg_start: bool,
     /// Extend an unterminated ORF's 3'-most exon downstream to the first in-frame stop
     /// when the path claims a terminal/single exon (`--extend-orf-stop`; EVM
     /// `extend_to_terminal`, applied after the trellis).
@@ -107,6 +111,29 @@ impl CalledGene {
 
 const MAX_RECURSION_DEPTH: usize = 32;
 
+/// `--require-atg-start`: how far (in codons) past the projected CDS start the in-frame
+/// ATG rescue may scan before the gene is flagged `partial5` instead.
+const MAX_ATG_SCAN_CODONS: usize = 120;
+
+/// Max bp to extend a path's 5'-most exon upstream looking for a stop-bounded ATG
+/// (the evidence start is truncated); the extended 5'UTR is trimmed to just past the
+/// bounding stop.
+const MAX_START_EXTEND: i64 = 5_000;
+
+/// First in-frame ATG at or after `t0`, within `MAX_ATG_SCAN_CODONS` codons, leaving at
+/// least one codon before the ORF end `t_end`. `seq` is the spliced transcript 5'->3'.
+fn first_in_frame_atg(seq: &[u8], t0: usize, t_end: usize) -> Option<usize> {
+    let limit = (t0 + MAX_ATG_SCAN_CODONS * 3).min(t_end);
+    let mut t = t0;
+    while t + 3 < t_end && t < limit {
+        if seq[t..t + 3].eq_ignore_ascii_case(b"ATG") {
+            return Some(t);
+        }
+        t += 3;
+    }
+    None
+}
+
 /// Extend the 3'-most exon of a path downstream (in transcription orientation) by up to
 /// MAX_TERMINAL_EXTEND bp and re-project the ORF; returns the extended exon set and the
 /// new projection iff an in-frame stop is now reached (EVM `extend_to_terminal`).
@@ -132,6 +159,95 @@ fn extend_path_to_stop(
     let seq = st.sequence(genome, contig)?;
     let proj = st.project_orf(&seq, cds_t_start.min(seq.len()), code);
     proj.hit_stop.then_some((ex, proj))
+}
+
+/// Extend the 5'-most exon of a path upstream by up to MAX_START_EXTEND bp and search it
+/// for an in-frame ATG bounded by the nearest upstream in-frame stop (the maximal ORF
+/// extension, for evidence whose 5' start is truncated). The retained 5'UTR is trimmed
+/// to just past the bounding stop so the gene does not swallow intergenic sequence.
+/// Returns the extended exons, transcript and the ORF re-projected
+/// from the ATG, iff such an ATG exists.
+fn extend_path_to_atg(
+    exons: &[Coordset],
+    orient: Strand,
+    genome: &Fasta,
+    contig: &str,
+    cds_t_start: usize, // offset in the ORIGINAL spliced transcript
+    code: &GeneticCode,
+) -> Option<(Vec<Coordset>, SplicedTranscript, OrfProjection)> {
+    let mut ex = exons.to_vec(); // lend-sorted ascending
+    let contig_len = genome.contig_len(contig)? as i64;
+    // extend the 5' end (smallest coordinate on '+', largest on '-')
+    let shift;
+    if orient == Strand::Minus {
+        let last = ex.last_mut().unwrap();
+        let old = last.rend;
+        last.rend = (last.rend + MAX_START_EXTEND).min(contig_len);
+        shift = (last.rend - old) as usize;
+    } else {
+        let first = ex.first_mut().unwrap();
+        let old = first.lend;
+        first.lend = (first.lend - MAX_START_EXTEND).max(1);
+        shift = (old - first.lend) as usize;
+    }
+    if shift == 0 {
+        return None;
+    }
+    let st = SplicedTranscript::new(&ex, orient);
+    let seq = st.sequence(genome, contig)?;
+    // original CDS start in the extended transcript; the in-frame codon grid is
+    // { t : (start5 - t) % 3 == 0 }
+    let start5 = shift + cds_t_start;
+    // walk upstream in-frame to the bounding stop codon
+    let mut stop_t: Option<usize> = None;
+    let mut t = start5 as i64 - 3;
+    while t >= 0 {
+        if code.is_stop(&seq[t as usize..t as usize + 3]) {
+            stop_t = Some(t as usize);
+            break;
+        }
+        t -= 3;
+    }
+    // trim the 5'UTR to just past the bounding stop
+    if let Some(ts) = stop_t {
+        let trim = ts + 3;
+        if trim >= shift {
+            return None; // stop inside the original first exon: no room to rescue
+        }
+        if orient == Strand::Minus {
+            ex.last_mut().unwrap().rend -= trim as i64;
+        } else {
+            ex.first_mut().unwrap().lend += trim as i64;
+        }
+        let st = SplicedTranscript::new(&ex, orient);
+        let seq = st.sequence(genome, contig)?;
+        return finish_atg_search(ex, st, seq, start5 - trim, code);
+    }
+    finish_atg_search(ex, st, seq, start5, code)
+}
+/// Scan the trimmed 5' extension of `seq` for the first in-frame ATG strictly upstream
+/// of the original CDS start `start5`, and re-project the ORF from it.
+fn finish_atg_search(
+    ex: Vec<Coordset>,
+    st: SplicedTranscript,
+    seq: Vec<u8>,
+    start5: usize,
+    code: &GeneticCode,
+) -> Option<(Vec<Coordset>, SplicedTranscript, OrfProjection)> {
+    let mut t = start5 % 3;
+    while t < start5 {
+        if seq[t..t + 3].eq_ignore_ascii_case(b"ATG") {
+            let proj = st.project_orf(&seq, t, code);
+            // reject only an ATG with no complete codon after it in the transcript; a stop
+            // counts, so an ATG immediately followed by a stop is accepted
+            if proj.cds_t_end > t + 3 {
+                return Some((ex, st, proj));
+            }
+            return None;
+        }
+        t += 3;
+    }
+    None
 }
 
 /// Find consensus genes in `region` on both strands.
@@ -186,6 +302,7 @@ pub fn consensus_region(
         None,
         genome,
         &cand.code,
+        eng.require_atg_start,
         eng.extend_orf_stop,
         &mut out,
     );
@@ -216,6 +333,7 @@ pub fn consensus_region(
             Some(hi),
             genome,
             &cand.code,
+            eng.require_atg_start,
             eng.extend_orf_stop,
             &mut out,
         );
@@ -281,6 +399,7 @@ fn resolve_all(
     transpose_hi: Option<i64>,
     genome: &Fasta,
     code: &GeneticCode,
+    require_atg: bool,
     extend_orf_stop: bool,
     out: &mut Vec<CalledGene>,
 ) {
@@ -294,6 +413,7 @@ fn resolve_all(
             *support,
             genome,
             code,
+            require_atg,
             extend_orf_stop,
         ));
     }
@@ -325,6 +445,7 @@ fn resolve(
     mut support: SupportFlags,
     genome: &Fasta,
     code: &GeneticCode,
+    require_atg: bool,
     extend_orf_stop: bool,
 ) -> CalledGene {
     let mut exons: Vec<Coordset> = g
@@ -355,11 +476,55 @@ fn resolve(
 
     // set when --extend-orf-stop extends the 3'-most exon to a downstream stop
     let mut extended3 = false;
+    // --require-atg-start may repair a gene's start or flag it 5'-partial
+    let mut partial5 = !has_start;
     let st = SplicedTranscript::new(&exons, orient);
     let (cds, five_utr, three_utr, hit_stop, cds_start_phase) = match st.sequence(genome, contig) {
         Some(seq) => {
             // the ORF (and its stop) is read from the first complete codon ...
+            let mut st = st;
             let mut proj = st.project_orf(&seq, p.min(seq.len()), code);
+            // --require-atg-start: the CDS must begin with ATG. Trim in-frame to the
+            // first ATG (the 5' overhang becomes 5'UTR); when the path holds no
+            // in-frame ATG (truncated evidence start), extend the 5'-most exon
+            // upstream to a stop-bounded ATG; otherwise flag the gene 5'-partial.
+            // Only a start codon is trimmed: a first exon that begins mid-codon is only
+            // extended, and a path that begins at an internal exon is left as it is.
+            let mut atg_ok = true;
+            let mut moved5 = false;
+            if require_atg {
+                let atg = if has_start {
+                    first_in_frame_atg(&seq, proj.cds_t_start, proj.cds_t_end)
+                } else {
+                    None
+                };
+                match atg {
+                    Some(t) => {
+                        moved5 = t != proj.cds_t_start;
+                        proj.cds_t_start = t;
+                    }
+                    None => {
+                        if matches!(first.exon_type, ExonType::Initial | ExonType::Single)
+                            && let Some((ex5, st5, proj5)) = extend_path_to_atg(
+                                &exons,
+                                orient,
+                                genome,
+                                contig,
+                                proj.cds_t_start,
+                                code,
+                            )
+                        {
+                            exons = ex5;
+                            st = st5;
+                            proj = proj5;
+                            moved5 = true;
+                        } else {
+                            atg_ok = false;
+                        }
+                    }
+                }
+                partial5 = !atg_ok;
+            }
             // --extend-orf-stop: an ORF that never reaches a stop (3'-partial evidence)
             // extends its 3'-most exon downstream to the first in-frame stop, capped at
             // MAX_TERMINAL_EXTEND (EVM `extend_to_terminal`), only when the path claims a
@@ -382,7 +547,10 @@ fn resolve(
             };
             // ... but a 5'-partial CDS starts at the transcript's first base, the leading
             // partial codon carried as the first CDS row's phase (GFF3), not as a 5'UTR
-            let (cds_t_start, phase) = if !has_start && proj.cds_t_end > proj.cds_t_start {
+            let (cds_t_start, phase) = if !has_start
+                && proj.cds_t_end > proj.cds_t_start
+                && !(require_atg && atg_ok)
+            {
                 (0, p as u8)
             } else {
                 (proj.cds_t_start, 0)
@@ -397,6 +565,8 @@ fn resolve(
                     exons.last_mut().unwrap().rend = cds.last().unwrap().rend;
                 }
                 three_utr = Vec::new();
+            }
+            if extended3 || moved5 {
                 support.coding_length = cds.iter().map(|c| c.len()).sum();
             }
             (cds, five_utr, three_utr, proj.hit_stop, phase)
@@ -405,6 +575,9 @@ fn resolve(
             // sequence unavailable (e.g. evidence past the contig end): emit the raw
             // path exons but never claim completeness — no stop scan was possible.
             let phase = if has_start { 0 } else { p as u8 };
+            if require_atg {
+                partial5 = true; // nor can the start codon be checked
+            }
             (exons.clone(), Vec::new(), Vec::new(), false, phase)
         }
     };
@@ -419,7 +592,7 @@ fn resolve(
         cds,
         five_utr,
         three_utr,
-        partial5: !has_start,
+        partial5,
         // a path rescued by the 3' extension terminates at a real stop codon
         partial3: !(has_stop || extended3) || !hit_stop,
         truncated,
@@ -653,6 +826,7 @@ mod tests {
                 research_intergenic: 0,
                 search_long_introns: 0,
                 intergenic_adjust: 1.0,
+                require_atg_start: false,
                 extend_orf_stop: false,
             },
         )
@@ -906,6 +1080,7 @@ mod tests {
         path: &[(i64, i64, ExonType, u8)],
         orient: Strand,
         transpose_hi: Option<i64>,
+        require_atg: bool,
         extend_orf_stop: bool,
     ) -> CalledGene {
         let (rd, g) = partial_path(len, path);
@@ -925,6 +1100,7 @@ mod tests {
             support,
             genome,
             &GeneticCode::default(),
+            require_atg,
             extend_orf_stop,
         )
     }
@@ -940,7 +1116,7 @@ mod tests {
             (10, 30, ExonType::Internal, 2),
             (50, 60, ExonType::Terminal, 1),
         ];
-        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None, false);
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None, false, false);
         assert_eq!(
             gene.cds,
             vec![Coordset::new(10, 23)],
@@ -964,7 +1140,7 @@ mod tests {
             (10, 30, ExonType::Internal, 3),
             (50, 60, ExonType::Terminal, 1),
         ];
-        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None, false);
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None, false, false);
         assert_eq!(
             gene.cds,
             vec![Coordset::new(10, 22)],
@@ -990,7 +1166,7 @@ mod tests {
             (11, 31, ExonType::Internal, 2),
             (51, 61, ExonType::Terminal, 1),
         ];
-        let gene = resolve_partial(&g, 200, &path, Strand::Minus, Some(200), false);
+        let gene = resolve_partial(&g, 200, &path, Strand::Minus, Some(200), false, false);
         assert_eq!(
             gene.exons,
             vec![Coordset::new(140, 150), Coordset::new(170, 190)]
@@ -1016,7 +1192,7 @@ mod tests {
             (10, 30, ExonType::Initial, 3),
             (60, 90, ExonType::Terminal, 3),
         ];
-        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false, false);
         assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(60, 90)]);
         assert!(
             gene.five_utr.is_empty(),
@@ -1042,7 +1218,7 @@ mod tests {
             (21, 41, ExonType::Initial, 2),
             (71, 90, ExonType::Terminal, 2),
         ];
-        let gene = resolve_partial(&g, 200, &path, Strand::Minus, Some(200), false);
+        let gene = resolve_partial(&g, 200, &path, Strand::Minus, Some(200), false, false);
         assert_eq!(
             gene.exons,
             vec![Coordset::new(111, 130), Coordset::new(160, 180)]
@@ -1090,7 +1266,7 @@ mod tests {
                 (10, 30, ExonType::Initial, 1),
                 (50, rend, ExonType::Terminal, 1),
             ];
-            let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false);
+            let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false, false);
             assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 70)]);
             assert_eq!(gene.three_utr, vec![Coordset::new(71, rend)]);
             assert_eq!(gene.truncated, truncated, "terminal exon 50..{rend}");
@@ -1110,7 +1286,7 @@ mod tests {
             (100, 120, ExonType::Terminal, 1),
         ];
         let g = genome_with(200, &[(10, b"ATG"), (56, b"TAA")]);
-        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false, false);
         assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 58)]);
         assert_eq!(
             gene.three_utr,
@@ -1121,7 +1297,7 @@ mod tests {
 
         // the same path with its stop at the end of the terminal exon is not truncated
         let g = genome_with(200, &[(10, b"ATG"), (118, b"TAA")]);
-        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, false, false);
         assert!(gene.three_utr.is_empty());
         assert!(!gene.truncated);
         assert!(!gene.partial3);
@@ -1136,7 +1312,7 @@ mod tests {
             (10, 30, ExonType::Initial, 1),
             (50, 69, ExonType::Terminal, 1),
         ];
-        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, true);
+        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, false, true);
         assert!(!gene.partial3, "extended to the downstream stop");
         assert!(!gene.partial5);
         // CDS and exon structure end at the rescued stop codon
@@ -1156,7 +1332,7 @@ mod tests {
             (10, 30, ExonType::Initial, 1),
             (50, 69, ExonType::Terminal, 1),
         ];
-        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, false);
+        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, false, false);
         assert!(gene.partial3, "no extension -> still 3'-partial");
         assert_eq!(
             gene.exons,
@@ -1178,7 +1354,7 @@ mod tests {
             (10, 30, ExonType::Initial, 1),
             (50, 69, ExonType::Terminal, 1),
         ];
-        let gene = resolve_partial(&g, 300, &path, Strand::Minus, Some(300), true);
+        let gene = resolve_partial(&g, 300, &path, Strand::Minus, Some(300), false, true);
         assert!(!gene.partial3);
         assert_eq!(
             gene.exons,
@@ -1201,12 +1377,306 @@ mod tests {
             (10, 30, ExonType::Initial, 1),
             (50, 69, ExonType::Internal, 1),
         ];
-        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, true);
+        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, false, true);
         assert!(gene.partial3);
         assert_eq!(
             gene.exons,
             vec![Coordset::new(10, 30), Coordset::new(50, 69)]
         );
         assert_eq!(gene.support.coding_length, 0);
+    }
+
+    #[test]
+    fn require_atg_extends_five_prime_to_an_upstream_atg() {
+        // Initial 100..120 -> Terminal 200..229 (frame 1), stop TAA at 227..229. The path
+        // itself holds no ATG (all-C), but an in-frame ATG sits upstream at 70..72.
+        let g = genome_with(300, &[(70, b"ATG"), (227, b"TAA")]);
+        let path = [
+            (100, 120, ExonType::Initial, 1),
+            (200, 229, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, true, false);
+        assert!(!gene.partial5, "rescued by the upstream ATG");
+        assert!(!gene.partial3);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(70, 120), Coordset::new(200, 229)]
+        );
+        // no bounding stop upstream -> the 5'UTR runs to the contig start
+        assert_eq!(gene.five_utr, vec![Coordset::new(1, 69)]);
+        assert!(gene.three_utr.is_empty());
+        assert_eq!(gene.support.coding_length, 81, "the repaired CDS length");
+    }
+
+    #[test]
+    fn five_prime_extension_trims_utr_at_the_bounding_stop() {
+        // as above, plus an in-frame stop TAA at 61..63 bounding the upstream ORF:
+        // the 5'UTR must be trimmed to start just past it (genomic 64)
+        let g = genome_with(300, &[(61, b"TAA"), (70, b"ATG"), (227, b"TAA")]);
+        let path = [
+            (100, 120, ExonType::Initial, 1),
+            (200, 229, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, true, false);
+        assert!(!gene.partial5);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(70, 120), Coordset::new(200, 229)]
+        );
+        assert_eq!(
+            gene.five_utr,
+            vec![Coordset::new(64, 69)],
+            "UTR trimmed to just past the bounding stop"
+        );
+    }
+
+    #[test]
+    fn require_atg_trims_to_the_first_in_frame_atg() {
+        // Initial 10..30 -> Terminal 50..61 on an all-C genome: no ATG at the exon start,
+        // the first in-frame ATG is at 16..18; the terminal stop TAA is at 59..61.
+        let g = genome_with(80, &[(16, b"ATG"), (59, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Initial, 1),
+            (50, 61, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None, true, false);
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(16, 30), Coordset::new(50, 61)],
+            "CDS starts at the ATG"
+        );
+        assert_eq!(gene.five_utr, vec![Coordset::new(10, 15)]);
+        assert!(!gene.partial5, "rescued by the in-frame ATG");
+        assert!(!gene.partial3, "stop at the very end of the path");
+        assert!(gene.three_utr.is_empty());
+        assert_eq!(gene.support.coding_length, 27);
+    }
+
+    #[test]
+    fn require_atg_flags_partial5_when_no_in_frame_atg() {
+        // same path but no ATG anywhere: stays 5'-partial, CDS unchanged
+        let g = genome_with(80, &[(59, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Initial, 1),
+            (50, 61, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None, true, false);
+        assert!(gene.partial5, "no in-frame ATG -> 5'-partial");
+        assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 61)]);
+        assert_eq!(gene.support.coding_length, 0, "unmodified: the input value");
+    }
+
+    #[test]
+    fn require_atg_off_keeps_unchecked_start() {
+        // flag off: no ATG check at all (combinr's non-canonical default)
+        let g = genome_with(80, &[(16, b"ATG"), (59, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Initial, 1),
+            (50, 61, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Plus, None, false, false);
+        assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 61)]);
+        assert!(!gene.partial5);
+    }
+
+    #[test]
+    fn require_atg_minus_strand_trims_to_the_first_in_frame_atg() {
+        // the trim case in the RC-local pass (hi = 80): Initial 10..30 -> Terminal 50..61,
+        // ATG at RC-local 16..18, stop at 59..61; forward exons 51..71 (5') and 20..31
+        let mut rc = vec![b'C'; 80];
+        rc[15..18].copy_from_slice(b"ATG"); // RC-local 16..18
+        rc[58..61].copy_from_slice(b"TAA"); // RC-local 59..61
+        let g = write_fasta(&reverse_complement(&rc));
+        let path = [
+            (10, 30, ExonType::Initial, 1),
+            (50, 61, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 80, &path, Strand::Minus, Some(80), true, false);
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(20, 31), Coordset::new(51, 71)]
+        );
+        assert_eq!(gene.cds, vec![Coordset::new(20, 31), Coordset::new(51, 65)]);
+        assert_eq!(gene.five_utr, vec![Coordset::new(66, 71)]);
+        assert!(!gene.partial5);
+        assert!(!gene.partial3);
+    }
+
+    #[test]
+    fn require_atg_minus_strand_extends_to_a_stop_bounded_atg() {
+        // the extension case in the RC-local pass (hi = 300): Initial 100..120 -> Terminal
+        // 200..229 with no ATG in the path; upstream an in-frame ATG at RC-local 70..72,
+        // bounded by the stop TAA at 61..63. Forward: exons 181..201 (5') and 72..101; the
+        // 5'-most exon is the forward-last one, extended toward larger coordinates.
+        let mut rc = vec![b'C'; 300];
+        rc[60..63].copy_from_slice(b"TAA"); // RC-local 61..63
+        rc[69..72].copy_from_slice(b"ATG"); // RC-local 70..72
+        rc[226..229].copy_from_slice(b"TAA"); // RC-local 227..229
+        let g = write_fasta(&reverse_complement(&rc));
+        let path = [
+            (100, 120, ExonType::Initial, 1),
+            (200, 229, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 300, &path, Strand::Minus, Some(300), true, false);
+        assert!(!gene.partial5);
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(72, 101), Coordset::new(181, 237)]
+        );
+        assert_eq!(
+            gene.cds,
+            vec![Coordset::new(72, 101), Coordset::new(181, 231)]
+        );
+        // the 5'UTR starts just past the bounding stop (RC-local 64 = forward 237)
+        assert_eq!(gene.five_utr, vec![Coordset::new(232, 237)]);
+        assert_eq!(gene.support.coding_length, 81);
+    }
+
+    #[test]
+    fn require_atg_extends_but_never_trims_a_mid_codon_start() {
+        // Initial 10..30 at start frame 3 (a 5'-partial prediction, first codon at 11) ->
+        // Terminal 50..62, stop TAA at 60..62, and an in-frame ATG inside the path at
+        // 17..19. That internal Met is not taken as the start: with no ATG upstream the
+        // gene stays 5'-partial with its CDS from the first base, phase 1.
+        let path = [
+            (10, 30, ExonType::Initial, 3),
+            (50, 62, ExonType::Terminal, 3),
+        ];
+        let g = genome_with(200, &[(17, b"ATG"), (60, b"TAA")]);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, true, false);
+        assert!(gene.partial5);
+        assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 62)]);
+        assert_eq!(gene.cds_start_phase, 1);
+
+        // an in-frame ATG upstream (2..4) is reached by extending the first exon
+        let g = genome_with(200, &[(2, b"ATG"), (17, b"ATG"), (60, b"TAA")]);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, true, false);
+        assert!(!gene.partial5);
+        assert_eq!(gene.cds, vec![Coordset::new(2, 30), Coordset::new(50, 62)]);
+        assert_eq!(gene.five_utr, vec![Coordset::new(1, 1)]);
+        assert_eq!(gene.cds_start_phase, 0);
+    }
+
+    #[test]
+    fn require_atg_leaves_an_internal_first_exon_unextended() {
+        // the extension case above, but the first exon is Internal 10..30 (5'-partial
+        // from an evidence acceptor, first codon at 11) -> Terminal 50..62, stop TAA at
+        // 60..62, with the in-frame ATG at 2..4 upstream. The path claims no start, so it
+        // is neither trimmed nor extended: 5'-partial, CDS from its first base, phase 1.
+        let path = [
+            (10, 30, ExonType::Internal, 3),
+            (50, 62, ExonType::Terminal, 3),
+        ];
+        let g = genome_with(200, &[(2, b"ATG"), (60, b"TAA")]);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None, true, false);
+        assert!(gene.partial5);
+        assert!(!gene.partial3);
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(10, 30), Coordset::new(50, 62)]
+        );
+        assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 62)]);
+        assert!(gene.five_utr.is_empty());
+        assert_eq!(gene.cds_start_phase, 1);
+        assert_eq!(gene.support.coding_length, 0, "unmodified: the input value");
+    }
+
+    #[test]
+    fn require_atg_keeps_a_single_exon_gene_without_atg() {
+        // Single 50..121 on an all-C genome, stop TAA at 119..121, no ATG anywhere. The
+        // trellis is unchanged by the flag, so the gene is still called; it is flagged
+        // 5'-partial with its CDS untouched.
+        let g = genome_with(200, &[(119, b"TAA")]);
+        let chains = vec![chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            Strand::Plus,
+            &[(50, 121)],
+        )];
+        let region = ConsensusRegion {
+            contig: "chr1".into(),
+            span: Coordset::new(1, 200),
+            chain_indices: vec![0],
+        };
+        let (cand, filt, w, mut eng) = config();
+        eng.require_atg_start = true;
+        let genes = consensus_region(&region, &chains, &g, &cand, &filt, &w, &eng, &[]);
+        let plus: Vec<_> = genes.iter().filter(|x| x.orient == Strand::Plus).collect();
+        assert_eq!(plus.len(), 1, "the no-ATG single-exon gene survives");
+        assert_eq!(plus[0].cds, vec![Coordset::new(50, 121)]);
+        assert!(plus[0].partial5);
+        assert!(!plus[0].partial3);
+    }
+
+    #[test]
+    fn require_atg_keeps_both_genes_of_a_region() {
+        // Two plus-strand genes in one region, bridged by a protein match: A starts with
+        // ATG, B does not. The flag only repairs starts after the trellis, so both genes
+        // are called with it on, as with it off; B is flagged 5'-partial.
+        let g = genome_with(1000, &[(101, b"ATG"), (228, b"TAA"), (628, b"TAA")]);
+        let mut a = chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            Strand::Plus,
+            &[(101, 130), (201, 230)],
+        );
+        a.accession = "A".into();
+        let mut b = chain(
+            EvClass::AbinitioPrediction,
+            1.0,
+            Strand::Plus,
+            &[(501, 530), (601, 630)],
+        );
+        b.accession = "B".into();
+        let mut p = chain(
+            EvClass::Protein,
+            1.0,
+            Strand::Plus,
+            &[(211, 220), (511, 520)],
+        );
+        p.accession = "P".into();
+        p.ev_type = "nap".into();
+        let chains = vec![a, b, p];
+        let region = ConsensusRegion {
+            contig: "chr1".into(),
+            span: Coordset::new(1, 1000),
+            chain_indices: vec![0, 1, 2],
+        };
+        let (cand, filt, w, mut eng) = config();
+        for require in [false, true] {
+            eng.require_atg_start = require;
+            let genes = consensus_region(&region, &chains, &g, &cand, &filt, &w, &eng, &[]);
+            let gene_at = |lend: i64| {
+                genes
+                    .iter()
+                    .find(|x| x.orient == Strand::Plus && x.span().0 == lend)
+            };
+            let (ga, gb) = (gene_at(101), gene_at(501));
+            assert!(ga.is_some() && gb.is_some(), "require_atg_start={require}");
+            assert!(!ga.unwrap().partial5);
+            assert_eq!(gb.unwrap().partial5, require);
+        }
+    }
+
+    #[test]
+    fn require_atg_with_extend_orf_stop_keeps_the_start_exon_whole() {
+        // Initial 10..30 -> Terminal 50..69: the ATG trim moves the start to 16 (5'UTR
+        // 10..15) and the run-off ORF is extended to the stop TAA at 71..73. The start
+        // exon stays one exon, 10..30, rather than splitting into 5'UTR and CDS pieces.
+        let g = genome_with(300, &[(16, b"ATG"), (71, b"TAA")]);
+        let path = [
+            (10, 30, ExonType::Initial, 1),
+            (50, 69, ExonType::Terminal, 1),
+        ];
+        let gene = resolve_partial(&g, 300, &path, Strand::Plus, None, true, true);
+        assert_eq!(
+            gene.exons,
+            vec![Coordset::new(10, 30), Coordset::new(50, 73)]
+        );
+        assert_eq!(gene.cds, vec![Coordset::new(16, 30), Coordset::new(50, 73)]);
+        assert_eq!(gene.five_utr, vec![Coordset::new(10, 15)]);
+        assert!(gene.three_utr.is_empty());
+        assert!(!gene.partial5 && !gene.partial3);
+        assert_eq!(gene.support.coding_length, 39);
     }
 }

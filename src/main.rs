@@ -174,6 +174,7 @@ impl ConsensusArgs {
             extend_terminal_stop: self.tuning.extend_terminal_stop,
             extend_orf_stop: self.tuning.extend_orf_stop,
             peak_augment: self.tuning.peak_augment,
+            require_atg_start: self.tuning.require_atg_start,
             intron_score_scale: self.tuning.intron_score_cap,
             promote_transcript_orfs: self.behavior.promote_transcript_orfs,
             alt_splice: self.behavior.alt_splice,

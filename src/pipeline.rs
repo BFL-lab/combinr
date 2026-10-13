@@ -167,6 +167,9 @@ pub struct ConsensusConfig {
     /// downstream in-frame stop (`--extend-orf-stop`).
     pub extend_orf_stop: bool,
     pub peak_augment: bool,
+    /// Repair the non-ATG start of a called gene at resolution (`--require-atg-start`):
+    /// trim to an in-frame ATG, extend upstream to one, or flag `partial5`.
+    pub require_atg_start: bool,
     /// Per-intron score scaling (`--intron-score-cap`); `Linear` = uncapped.
     pub intron_score_scale: crate::consensus::IntronScoreScale,
     pub promote_transcript_orfs: bool,
@@ -222,6 +225,7 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
         research_intergenic: cfg.research_intergenic,
         search_long_introns: cfg.search_long_introns,
         intergenic_adjust: DEFAULT_INTERGENIC_ADJUST,
+        require_atg_start: cfg.require_atg_start,
         extend_orf_stop: cfg.extend_orf_stop,
     };
 

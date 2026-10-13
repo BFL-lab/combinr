@@ -246,6 +246,19 @@ pub struct ConsensusTuning {
     /// flagged low_support.
     #[arg(long, default_value = "0")]
     pub intron_score_cap: combinr::consensus::IntronScoreScale,
+    /// Repair called genes whose CDS does not start with ATG; applied after the trellis
+    /// (candidate exons and gene choice are unchanged). For a gene that begins at an
+    /// initial or single exon: an ATG start is kept; otherwise the start moves to the
+    /// first in-frame ATG within 120 codons (the skipped bases become 5'UTR); otherwise
+    /// up to 5 kb of genome upstream is scanned in frame for an ATG after the nearest
+    /// upstream in-frame stop, and the first exon is extended to it (its 5'UTR starts just
+    /// past that stop, or at the far end of the scan when there is none); otherwise the
+    /// gene is flagged partial5. A first exon that begins mid-codon is only extended, never
+    /// trimmed; genes that begin at an internal exon are unchanged. The start codon is ATG
+    /// under every genetic code (the code sets only the stops). A modified gene's
+    /// coding_length is its CDS length; low_support is not re-assessed. Off by default.
+    #[arg(long)]
+    pub require_atg_start: bool,
 }
 
 #[derive(Parser, Debug)]
