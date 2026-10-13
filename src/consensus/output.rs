@@ -18,12 +18,14 @@ pub(crate) fn format_ratio(g: &CalledGene) -> String {
     }
 }
 
-/// The six consensus attributes shared by both renderers, in their load-bearing GFF order:
-/// `score, score_ratio, coding_length, low_support, partial5, partial3`. Callers prepend
-/// the `support` tag (and the `--alt-splice` path appends `sources`/`contains`) themselves,
-/// so the two modes stay intentionally — not accidentally — in sync.
+/// The consensus attributes shared by both renderers, in their load-bearing GFF order:
+/// `score, score_ratio, coding_length, low_support, partial5, partial3`, then
+/// `truncated=true` only for a gene whose CDS a premature stop cut short, one followed by
+/// at least one more complete codon of the path (absent otherwise). Callers prepend the
+/// `support` tag (and the `--alt-splice` path appends `sources`/`contains`)
+/// themselves, so the two modes stay intentionally — not accidentally — in sync.
 pub(crate) fn consensus_core_attrs(g: &CalledGene) -> Vec<(String, Vec<String>)> {
-    vec![
+    let mut v = vec![
         ("score".into(), vec![format!("{:.1}", g.score)]),
         ("score_ratio".into(), vec![format_ratio(g)]),
         (
@@ -36,7 +38,11 @@ pub(crate) fn consensus_core_attrs(g: &CalledGene) -> Vec<(String, Vec<String>)>
         ),
         ("partial5".into(), vec![g.partial5.to_string()]),
         ("partial3".into(), vec![g.partial3.to_string()]),
-    ]
+    ];
+    if g.truncated {
+        v.push(("truncated".into(), vec!["true".into()]));
+    }
+    v
 }
 
 /// The deterministic output order and gene IDs: sorted by `(contig, lend, rend, strand)`
@@ -113,6 +119,7 @@ mod tests {
             three_utr: vec![],
             partial5,
             partial3: false,
+            truncated: false,
             cds_start_phase,
             score: 100.0,
             support: SupportFlags {
@@ -135,5 +142,24 @@ mod tests {
         assert_eq!(t(0).cds_start_phase, 0, "complete gene: phase 0");
         assert_eq!(t(1).cds[0].lend, 100);
         assert_eq!(t(1).cds_start_phase, 2, "5'-partial gene: its phase");
+    }
+
+    #[test]
+    fn truncated_attribute_only_when_true() {
+        let mut cut = gene(100, false, 0);
+        cut.truncated = true;
+        let out = to_out_genes(&[gene(10, false, 0), cut]);
+        let clean = &out[0].transcripts[0].attrs;
+        assert!(
+            !clean.iter().any(|(k, _)| k == "truncated"),
+            "absent when false"
+        );
+        let attrs = &out[1].transcripts[0].attrs;
+        let n = attrs.len();
+        assert_eq!(attrs[n - 2].0, "partial3");
+        assert_eq!(
+            attrs[n - 1],
+            ("truncated".to_string(), vec!["true".to_string()])
+        );
     }
 }

@@ -51,6 +51,11 @@ pub struct CalledGene {
     pub three_utr: Vec<Coordset>,
     pub partial5: bool,
     pub partial3: bool,
+    /// The ORF reached an in-frame stop followed by at least one more complete codon of
+    /// the path, so the CDS stops short and the rest of the path is 3'UTR (a premature
+    /// stop; 1-2 stray bases after a stop are not a lost codon). Independent of
+    /// `partial3`, which keeps its meaning (no stop codon claimed or found).
+    pub truncated: bool,
     /// GFF3 phase of the 5'-most CDS base: the number of bases before the first complete
     /// codon. Nonzero only for a 5'-partial gene, whose CDS starts at its first exon base
     /// (the partial codon is coding, not UTR); 0 for a gene with a start codon.
@@ -334,6 +339,9 @@ fn resolve(
         }
     };
 
+    // a stop followed by at least one more complete codon of the path cut the CDS short
+    // (premature); 1-2 trailing bases after the stop are not a lost codon
+    let truncated = hit_stop && three_utr.iter().map(|c| c.len()).sum::<i64>() >= 3;
     CalledGene {
         contig: contig.into(),
         orient,
@@ -343,6 +351,7 @@ fn resolve(
         three_utr,
         partial5: !has_start,
         partial3: !has_stop || !hit_stop,
+        truncated,
         cds_start_phase,
         score: g.score,
         support,
@@ -992,5 +1001,54 @@ mod tests {
         assert_eq!(genes[0].cds, vec![Coordset::new(50, 120)]);
         assert!(!genes[0].partial5);
         assert!(genes[0].partial3, "no sequence, no stop scan: 3'-partial");
+    }
+
+    #[test]
+    fn one_or_two_bases_past_the_stop_are_not_a_truncation() {
+        // Initial 10..30 -> Terminal 50..rend, frame 1, TAA at 68..70. With 1-2 bases
+        // after the stop the path holds no further complete codon: the stop is the
+        // gene's own, so the gene is neither truncated nor 3'-partial (the stray bases
+        // stay 3'UTR). Three bases after the stop are one more codon: truncated.
+        let g = genome_with(200, &[(10, b"ATG"), (68, b"TAA")]);
+        for (rend, truncated) in [(71, false), (72, false), (73, true)] {
+            let path = [
+                (10, 30, ExonType::Initial, 1),
+                (50, rend, ExonType::Terminal, 1),
+            ];
+            let gene = resolve_partial(&g, 200, &path, Strand::Plus, None);
+            assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 70)]);
+            assert_eq!(gene.three_utr, vec![Coordset::new(71, rend)]);
+            assert_eq!(gene.truncated, truncated, "terminal exon 50..{rend}");
+            assert!(!gene.partial3);
+        }
+    }
+
+    #[test]
+    fn premature_stop_marks_the_gene_truncated() {
+        // Initial 10..30 -> Internal 50..70 -> Terminal 100..120, all frame 1. An in-frame
+        // TAA at 56..58 ends the ORF inside the internal exon: the CDS stops there and the
+        // rest of the path becomes 3'UTR. The path claims a terminus and a stop was found,
+        // so partial3 stays false; truncated reports the cut-short CDS.
+        let path = [
+            (10, 30, ExonType::Initial, 1),
+            (50, 70, ExonType::Internal, 1),
+            (100, 120, ExonType::Terminal, 1),
+        ];
+        let g = genome_with(200, &[(10, b"ATG"), (56, b"TAA")]);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None);
+        assert_eq!(gene.cds, vec![Coordset::new(10, 30), Coordset::new(50, 58)]);
+        assert_eq!(
+            gene.three_utr,
+            vec![Coordset::new(59, 70), Coordset::new(100, 120)]
+        );
+        assert!(gene.truncated);
+        assert!(!gene.partial3);
+
+        // the same path with its stop at the end of the terminal exon is not truncated
+        let g = genome_with(200, &[(10, b"ATG"), (118, b"TAA")]);
+        let gene = resolve_partial(&g, 200, &path, Strand::Plus, None);
+        assert!(gene.three_utr.is_empty());
+        assert!(!gene.truncated);
+        assert!(!gene.partial3);
     }
 }

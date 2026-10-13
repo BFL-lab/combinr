@@ -249,7 +249,7 @@ fn cds_model(
 /// transcripts' provenance is recorded so the UTR support is traceable. The `utrs`
 /// already honour the gene's partial flags (no UTR at a partial end).
 fn consensus_mrna(g: &CalledGene, gene_id: &str, utrs: &Utrs) -> OutTranscript {
-    // `support` first (always present here), then the six shared consensus attributes.
+    // `support` first (always present here), then the shared consensus attributes.
     let support = if g.promoted {
         "transcript_orf"
     } else {
@@ -570,6 +570,7 @@ mod tests {
             three_utr: vec![],
             partial5: false,
             partial3: false,
+            truncated: false,
             cds_start_phase: 0,
             score: 100.0,
             support: SupportFlags {

@@ -243,7 +243,10 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
   the two isoforms, and after the ORF step, the region (5'UTR / CDS / 3'UTR).
 - **Consensus gene models** (`consensus`) to stdout as GFF3 `gene`/`mRNA`/`exon`/`CDS`
   with CDS phases (the exon structure is the coding structure). Each mRNA carries
-  `score`, `score_ratio`, `coding_length`, `low_support`, and `partial5`/`partial3`.
+  `score`, `score_ratio`, `coding_length`, `low_support`, and `partial5`/`partial3`,
+  plus `truncated=true` when the CDS ends at a premature in-frame stop, one followed
+  by at least one more complete codon of the gene's exons (the rest becomes 3'UTR;
+  independent of `partial3`).
   A 5'-partial gene (`partial5=true`) starts its CDS at its first exon base, and the
   first CDS row's phase gives the offset to the first complete codon (no partial-codon
   UTR).
@@ -251,12 +254,12 @@ and `--verbose`. The `> out.gff3` redirections above are interchangeable with
   `.evm.out` style) for screening genes by their support. Two `##` lines describe the
   format; then per gene a `#` header with its GFF3 gene ID, span, strand, `score`,
   `noncoding_equivalent`, `raw_noncoding`, `S-ratio`, `coding_length`, `low_support`,
-  `partial5`/`partial3` and `support` (`NA` noncoding fields for promoted
-  transcript-ORF genes), one tab-separated line per exon (`end5 end3 type+strand
-  start_frame end_frame evidence`; frames 1-3 forward, 4-6 reverse; `end5 > end3` on
-  the minus strand) and per intron (`end5 end3 INTRON` + evidence), each listing the
-  supporting evidence as `{accession;source}` (source = GFF column 2), then a blank
-  line. For example:
+  `partial5`/`partial3`, `truncated(true)` for a truncated gene only, and `support`
+  (`NA` noncoding fields for promoted transcript-ORF genes), one tab-separated line
+  per exon (`end5 end3 type+strand start_frame end_frame evidence`; frames 1-3
+  forward, 4-6 reverse; `end5 > end3` on the minus strand) and per intron (`end5 end3
+  INTRON` + evidence), each listing the supporting evidence as `{accession;source}`
+  (source = GFF column 2), then a blank line. For example:
 
   ```
   # consensus.Contig1.g1 Contig1:842-3150 orient(+) score(70050.00) noncoding_equivalent(133.00) raw_noncoding(133.00) S-ratio(526.69) coding_length(948) low_support(false) partial5(false) partial3(false) support(consensus)

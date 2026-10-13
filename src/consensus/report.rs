@@ -4,10 +4,12 @@
 //! Layout: two leading `##` lines describing the format, then per gene a header line
 //!
 //! ```text
-//! # <gene_id> <contig>:<lend>-<rend> orient(<+|->) score(<%.2f>) noncoding_equivalent(<%.2f|NA>) raw_noncoding(<%.2f|NA>) S-ratio(<%.2f|inf|NA>) coding_length(<n>) low_support(<bool>) partial5(<bool>) partial3(<bool>) support(<consensus|transcript_orf>)
+//! # <gene_id> <contig>:<lend>-<rend> orient(<+|->) score(<%.2f>) noncoding_equivalent(<%.2f|NA>) raw_noncoding(<%.2f|NA>) S-ratio(<%.2f|inf|NA>) coding_length(<n>) low_support(<bool>) partial5(<bool>) partial3(<bool>)[ truncated(true)] support(<consensus|transcript_orf>)
 //! ```
 //!
-//! followed by one line per exon and intron in ascending genomic order, and a blank line:
+//! (` truncated(true)` only for a gene whose CDS a premature stop cut short, one followed
+//! by at least one more complete codon of the path), followed by one line per exon and
+//! intron in ascending genomic order, and a blank line:
 //!
 //! ```text
 //! end5<TAB>end3<TAB><type><+|-><TAB><start_frame><TAB><end_frame><TAB>{accession;source},...
@@ -53,7 +55,7 @@ fn write_gene<W: Write>(w: &mut W, gene_id: &str, g: &CalledGene) -> io::Result<
     };
     writeln!(
         w,
-        "# {gene_id} {}:{lend}-{rend} orient({orient}) score({:.2}) noncoding_equivalent({}) raw_noncoding({}) S-ratio({}) coding_length({}) low_support({}) partial5({}) partial3({}) support({})",
+        "# {gene_id} {}:{lend}-{rend} orient({orient}) score({:.2}) noncoding_equivalent({}) raw_noncoding({}) S-ratio({}) coding_length({}) low_support({}) partial5({}) partial3({}){} support({})",
         g.contig,
         g.score,
         noncoding(g.support.noncoding_equivalent),
@@ -63,6 +65,7 @@ fn write_gene<W: Write>(w: &mut W, gene_id: &str, g: &CalledGene) -> io::Result<
         g.support.low_support,
         g.partial5,
         g.partial3,
+        if g.truncated { " truncated(true)" } else { "" },
         if g.promoted {
             "transcript_orf"
         } else {
@@ -149,6 +152,7 @@ mod tests {
             three_utr: vec![],
             partial5: false,
             partial3: true,
+            truncated: false,
             cds_start_phase: 0,
             score: 1234.567,
             support: SupportFlags {
@@ -242,5 +246,23 @@ mod tests {
         assert_eq!(lines[3], "10\t69\tsingle+\t1\t3\t{t1;PASA},{t2;transcript}");
         assert_eq!(lines[4], "");
         assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn truncated_gene_header_flags_it_after_partial3() {
+        let mut g = gene(
+            Strand::Plus,
+            false,
+            vec![exon(10, 39, ExonType::Single, 1, 3, &[("p1", "fgenesh")])],
+        );
+        g.partial3 = false;
+        g.truncated = true;
+        let lines = render(&[("consensus.chr1.g1".into(), &g)]);
+        assert!(
+            lines[2]
+                .ends_with(" partial5(false) partial3(false) truncated(true) support(consensus)"),
+            "{}",
+            lines[2]
+        );
     }
 }
