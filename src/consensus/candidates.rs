@@ -36,6 +36,57 @@ use std::collections::HashMap;
 /// Max bp to extend a terminal alignment segment downstream looking for a stop codon.
 const MAX_TERMINAL_EXTEND: i64 = 10_000;
 
+/// How the unmasked length of one intron maps to its score contribution
+/// (`--intron-score-cap`), per intron per supporting chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntronScoreScale {
+    /// `weight x len` (EVM behaviour; the default).
+    Linear,
+    /// `weight x min(len, cap)`.
+    Cap(i64),
+    /// `weight x len` up to 1 kb, then logarithmic
+    /// (`weight x 1 kb x (1 + ln(len / 1 kb))`): giant introns keep scoring more but
+    /// can no longer outscore gene-splitting signals by orders of magnitude.
+    Smooth,
+}
+
+/// Knee (bp) for [`IntronScoreScale::Smooth`]: introns up to this length score linearly.
+pub(crate) const INTRON_SMOOTH_KNEE: i64 = 1_000;
+
+impl IntronScoreScale {
+    /// The length contributing to an intron's score under this scaling.
+    pub fn scored_len(self, len: i64) -> i64 {
+        match self {
+            Self::Linear => len,
+            Self::Cap(cap) => len.min(cap),
+            Self::Smooth => {
+                if len <= INTRON_SMOOTH_KNEE {
+                    len
+                } else {
+                    let k = INTRON_SMOOTH_KNEE as f64;
+                    (k * (1.0 + (len as f64 / k).ln())).round() as i64
+                }
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for IntronScoreScale {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "0" | "off" => Ok(Self::Linear),
+            "auto" => Ok(Self::Smooth),
+            _ => match s.parse::<i64>() {
+                Ok(n) if n > 0 => Ok(Self::Cap(n)),
+                _ => Err(format!(
+                    "invalid --intron-score-cap {s:?} (expected 0, auto, or a bp cap)"
+                )),
+            },
+        }
+    }
+}
+
 /// Tunables for candidate generation.
 #[derive(Clone, Copy, Debug)]
 pub struct CandidateParams {
@@ -47,6 +98,11 @@ pub struct CandidateParams {
     /// Boost intergenic scores near start/stop evidence-density peaks
     /// (EVM `augment_intergenic_from_start_stop_peaks`).
     pub peak_augment: bool,
+    /// Cap on the unmasked length contributing to an intron's score. Anti-fusion knob
+    /// for repeat-rich genomes: without it, a giant intron from a misassembled
+    /// transcript outweighs any intergenic signal and the trellis absorbs the
+    /// neighbouring gene. `Cap(n)` hard-caps, `Smooth` scales logarithmically.
+    pub intron_score_scale: IntronScoreScale,
     /// Sum of all gene-prediction weights (EVM `SUM_GENEPRED_WEIGHTS`), the peak threshold
     /// and the augmented intergenic level.
     pub sum_genepred_weights: f64,
@@ -79,6 +135,7 @@ pub fn build_candidates(
         code: &params.code,
         min_intron_length: params.min_intron_length,
         extend_terminal_stop: params.extend_terminal_stop,
+        intron_score_scale: params.intron_score_scale,
         sum_genepred_weights: params.sum_genepred_weights,
         vectors: RegionVectors::new(span.lend, len),
         introns: IntronScores::default(),
@@ -126,6 +183,7 @@ struct Builder<'a> {
     code: &'a GeneticCode,
     min_intron_length: i64,
     extend_terminal_stop: bool,
+    intron_score_scale: IntronScoreScale,
     sum_genepred_weights: f64,
     vectors: RegionVectors,
     introns: IntronScores,
@@ -368,8 +426,9 @@ impl Builder<'_> {
                 continue;
             }
             let unmasked = self.vectors.unmasked_len(intron.lend, intron.rend);
+            let scored = self.intron_score_scale.scored_len(unmasked);
             let key = (intron.lend, intron.rend);
-            self.introns.add(key, chain.weight, unmasked);
+            self.introns.add(key, chain.weight, scored);
             self.introns
                 .attribute(key, &chain.accession, &chain.ev_type);
         }
@@ -439,6 +498,7 @@ mod tests {
             code: GeneticCode::default(),
             extend_terminal_stop: false,
             peak_augment: false,
+            intron_score_scale: IntronScoreScale::Linear,
             sum_genepred_weights: 0.0,
         }
     }
@@ -601,6 +661,38 @@ mod tests {
         let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
         assert!(!rd.exons.iter().any(|e| e.coords == Coordset::new(50, 61)));
         assert_eq!(rd.exons.len(), 2, "initial and terminal exons stay");
+    }
+
+    #[test]
+    fn intron_score_scale_parses_and_scales() {
+        use std::str::FromStr;
+        assert_eq!(
+            IntronScoreScale::from_str("0"),
+            Ok(IntronScoreScale::Linear)
+        );
+        assert_eq!(
+            IntronScoreScale::from_str("auto"),
+            Ok(IntronScoreScale::Smooth)
+        );
+        assert_eq!(
+            IntronScoreScale::from_str("2000"),
+            Ok(IntronScoreScale::Cap(2000))
+        );
+        assert!(IntronScoreScale::from_str("-5").is_err());
+        assert!(IntronScoreScale::from_str("banana").is_err());
+
+        // linear and cap
+        assert_eq!(IntronScoreScale::Linear.scored_len(15_000), 15_000);
+        assert_eq!(IntronScoreScale::Cap(2000).scored_len(15_000), 2000);
+        // smooth: linear up to the 1 kb knee, logarithmic beyond
+        assert_eq!(IntronScoreScale::Smooth.scored_len(500), 500);
+        assert_eq!(IntronScoreScale::Smooth.scored_len(1_000), 1_000);
+        let s15k = IntronScoreScale::Smooth.scored_len(15_000);
+        assert!((3000..4500).contains(&s15k), "15 kb -> {s15k}"); // ~3708
+        let s50k = IntronScoreScale::Smooth.scored_len(50_000);
+        assert!((4500..5500).contains(&s50k), "50 kb -> {s50k}"); // ~4912
+        // monotone: longer introns still score more, but barely
+        assert!(s50k > s15k && s50k < 2 * s15k);
     }
 
     #[test]

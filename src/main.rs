@@ -173,6 +173,7 @@ impl ConsensusArgs {
             search_long_introns: self.behavior.search_long_introns,
             extend_terminal_stop: self.tuning.extend_terminal_stop,
             peak_augment: self.tuning.peak_augment,
+            intron_score_scale: self.tuning.intron_score_cap,
             promote_transcript_orfs: self.behavior.promote_transcript_orfs,
             alt_splice: self.behavior.alt_splice,
             min_coding_length: DEFAULT_MIN_CODING_LENGTH,

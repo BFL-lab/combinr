@@ -566,6 +566,7 @@ mod tests {
                 code: GeneticCode::default(),
                 extend_terminal_stop: false,
                 peak_augment: false,
+                intron_score_scale: crate::consensus::IntronScoreScale::Linear,
                 sum_genepred_weights: 0.0,
             },
             FilterParams {

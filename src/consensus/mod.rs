@@ -30,7 +30,7 @@ pub mod trellis;
 pub mod vectors;
 pub mod weights;
 
-pub use candidates::{CandidateParams, RegionData, build_candidates};
+pub use candidates::{CandidateParams, IntronScoreScale, RegionData, build_candidates};
 pub use engine::{CalledGene, EngineParams, FeatureKind, FeatureSupport, consensus_region};
 pub use evidence::EvidenceChain;
 pub use exon::{ExonCandidate, ExonType};

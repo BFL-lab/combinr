@@ -164,6 +164,8 @@ pub struct ConsensusConfig {
     pub search_long_introns: i64,
     pub extend_terminal_stop: bool,
     pub peak_augment: bool,
+    /// Per-intron score scaling (`--intron-score-cap`); `Linear` = uncapped.
+    pub intron_score_scale: crate::consensus::IntronScoreScale,
     pub promote_transcript_orfs: bool,
     pub alt_splice: bool,
     pub min_coding_length: i64,
@@ -202,6 +204,7 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
         code,
         extend_terminal_stop: cfg.extend_terminal_stop,
         peak_augment: cfg.peak_augment,
+        intron_score_scale: cfg.intron_score_scale,
         sum_genepred_weights: weights.sum_genepred_weights(),
     };
     let filt = FilterParams {

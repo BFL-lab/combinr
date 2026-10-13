@@ -229,6 +229,16 @@ pub struct ConsensusTuning {
     /// Boost intergenic scores near start/stop evidence-density peaks. Off by default.
     #[arg(long)]
     pub peak_augment: bool,
+    /// Cap on the unmasked length (bp) contributing to any single intron's score, or
+    /// `auto` for smooth logarithmic scaling (linear up to 1 kb, log beyond).
+    /// 0 = uncapped (the default). Anti-fusion knob for repeat-rich genomes: without a
+    /// cap, a giant intron from a misassembled transcript outweighs the intergenic signal
+    /// and the trellis absorbs the neighbouring gene. 1000-5000 works well for plants;
+    /// vertebrates with genuinely long introns should use 10000+ or auto.
+    /// Capping also lowers the gene score and score_ratio, so more genes can be
+    /// flagged low_support.
+    #[arg(long, default_value = "0")]
+    pub intron_score_cap: combinr::consensus::IntronScoreScale,
 }
 
 #[derive(Parser, Debug)]
