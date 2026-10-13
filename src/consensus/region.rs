@@ -67,6 +67,7 @@ mod tests {
             orient: Strand::Plus,
             span: Coordset::new(lend, rend),
             links: vec![Coordset::new(lend, rend)],
+            cds_start_phase: 0,
         }
     }
 

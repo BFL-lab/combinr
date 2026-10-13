@@ -220,6 +220,7 @@ fn build_rc_region(
             orient: Strand::Plus,
             span,
             links,
+            cds_start_phase: c.cds_start_phase,
         });
     }
 
@@ -539,6 +540,7 @@ mod tests {
             orient,
             span,
             links,
+            cds_start_phase: 0,
         }
     }
 

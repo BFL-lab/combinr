@@ -6,7 +6,8 @@
 //! evidence-derived model:
 //! - gene predictions (ABINITIO/OTHER): each CDS segment is a typed exon
 //!   (initial/internal/terminal/single by position), its frame computed from the
-//!   cumulative coding length (`cds_length % 3 + 1`), not the GFF phase column;
+//!   cumulative coding length (`cds_length % 3 + 1`) seeded by the GFF phase column
+//!   of the chain's 5'-most CDS row (a nonzero phase marks a 5'-partial prediction);
 //! - proteins: paint the coding vector for every segment, and seed internal exons for
 //!   internal segments with all stop-free reading frames;
 //! - transcripts: seed internal exons (no coding-vector painting — their contribution
@@ -151,7 +152,15 @@ impl Builder<'_> {
                 .1
                 .push(chain.span);
         }
-        let mut cum_len = 0i64;
+        // GFF3 phase of the 5'-most CDS row = bases skipped to the first complete codon.
+        // Seed the cumulative length so the inherited frames match the predictor's own
+        // reading frame: phase 0 -> frame 1 (cum_len 0), phase 1 -> frame 3 (cum_len 2),
+        // phase 2 -> frame 2 (cum_len 1).
+        let mut cum_len: i64 = match chain.cds_start_phase {
+            1 => 2,
+            2 => 1,
+            _ => 0,
+        };
         for (i, seg) in chain.links.iter().enumerate() {
             let exon_type = position_type(i, n);
             let start_frame = (cum_len.rem_euclid(3) + 1) as u8;
@@ -411,6 +420,7 @@ mod tests {
             orient: Strand::Plus,
             span,
             links,
+            cds_start_phase: 0,
         }
     }
 
@@ -559,6 +569,20 @@ mod tests {
         // identical exon structure -> 2 unique exons (initial + terminal), each with 2 evidences
         assert_eq!(rd.exons.len(), 2);
         assert!(rd.exons.iter().all(|e| e.evidence.len() == 2));
+    }
+
+    #[test]
+    fn prediction_frames_honor_the_gff_phase_column() {
+        // same two-exon prediction as `prediction_yields_typed_framed_exons_and_intron_coverage`,
+        // but the chain carries a 5' phase of 1 (a 5'-partial input prediction)
+        let g = genome(70, &[(56, b"TAA")]);
+        let mut c = chain(EvClass::AbinitioPrediction, 1.0, &[(10, 18), (50, 58)]);
+        c.cds_start_phase = 1;
+        let chains = vec![c];
+        let rd = build_candidates(&region(&chains), &chains, &g, &params(), &[]);
+        assert_eq!(rd.exons[0].start_frame, 3, "phase 1 -> skip 1 base -> frame 3");
+        // cum_len = 2 (seed) + 9 = 11 -> 11 % 3 + 1 = 3
+        assert_eq!(rd.exons[1].start_frame, 3);
     }
 
     #[test]
