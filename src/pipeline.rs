@@ -163,6 +163,9 @@ pub struct ConsensusConfig {
     pub research_intergenic: i64,
     pub search_long_introns: i64,
     pub extend_terminal_stop: bool,
+    /// Extend a called gene's run-off ORF from its terminal/single exon to the first
+    /// downstream in-frame stop (`--extend-orf-stop`).
+    pub extend_orf_stop: bool,
     pub peak_augment: bool,
     /// Per-intron score scaling (`--intron-score-cap`); `Linear` = uncapped.
     pub intron_score_scale: crate::consensus::IntronScoreScale,
@@ -219,6 +222,7 @@ fn consensus_inner(cfg: &ConsensusConfig) -> Result<ConsensusInner> {
         research_intergenic: cfg.research_intergenic,
         search_long_introns: cfg.search_long_introns,
         intergenic_adjust: DEFAULT_INTERGENIC_ADJUST,
+        extend_orf_stop: cfg.extend_orf_stop,
     };
 
     let mask = match &cfg.repeats {

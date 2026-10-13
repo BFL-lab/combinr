@@ -226,6 +226,13 @@ pub struct ConsensusTuning {
     /// (lets evidence-only loci gain a 3' end). Off by default.
     #[arg(long)]
     pub extend_terminal_stop: bool,
+    /// Extend a called gene whose ORF runs off the end of its terminal or single exon
+    /// downstream, in frame, to the first stop codon under the genetic code (scanning up
+    /// to 10 kb of genome), so the gene ends at a real stop; applied after the trellis.
+    /// Genes that end at an internal exon stay 3'-partial. An extended gene's
+    /// coding_length is its CDS length; low_support is not re-assessed. Off by default.
+    #[arg(long)]
+    pub extend_orf_stop: bool,
     /// Boost intergenic scores near start/stop evidence-density peaks. Off by default.
     #[arg(long)]
     pub peak_augment: bool,

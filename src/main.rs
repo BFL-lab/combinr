@@ -172,6 +172,7 @@ impl ConsensusArgs {
             research_intergenic: self.behavior.research_intergenic,
             search_long_introns: self.behavior.search_long_introns,
             extend_terminal_stop: self.tuning.extend_terminal_stop,
+            extend_orf_stop: self.tuning.extend_orf_stop,
             peak_augment: self.tuning.peak_augment,
             intron_score_scale: self.tuning.intron_score_cap,
             promote_transcript_orfs: self.behavior.promote_transcript_orfs,

@@ -34,7 +34,7 @@ use crate::orf::GeneticCode;
 use std::collections::HashMap;
 
 /// Max bp to extend a terminal alignment segment downstream looking for a stop codon.
-const MAX_TERMINAL_EXTEND: i64 = 10_000;
+pub(crate) const MAX_TERMINAL_EXTEND: i64 = 10_000;
 
 /// How the unmasked length of one intron maps to its score contribution
 /// (`--intron-score-cap`), per intron per supporting chain.

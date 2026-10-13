@@ -45,6 +45,7 @@ fn default_config() -> ConsensusConfig {
         research_intergenic: 0,
         search_long_introns: 0,
         extend_terminal_stop: false,
+        extend_orf_stop: false,
         peak_augment: false,
         intron_score_scale: combinr::consensus::IntronScoreScale::Linear,
         promote_transcript_orfs: false,
